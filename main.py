@@ -104,7 +104,7 @@ while True:
 
     # 1. LEAK LOGIC (Critical)
     if leak_detected or leak.value() == 0:
-        trigger_alarm('FLOODING')
+        trigger_alarm('LEAK')
         # Emergency Shutdown logic...
         while True:
             wdt.feed()

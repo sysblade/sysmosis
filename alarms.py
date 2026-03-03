@@ -32,15 +32,10 @@ NOTE_C6   = 1047
 # --- 2. Alarm Definitions ---
 # Priority: Lower number = Higher priority (0 is highest)
 ALARMS = {
-    'FLOODING': {
+    'LEAK': {
         'notes': [(NOTE_A5, 100), (NOTE_E5, 100), (NOTE_A5, 100), (NOTE_E5, 100)],
         'blink': 100,
         'priority': 0
-    },
-    'LEAK': {
-        'notes': [(NOTE_D5, 100), (NOTE_REST, 800)],
-        'blink': 1500,
-        'priority': 1
     },
     'LOW_PRESSURE': {
         'notes': [(NOTE_G5, 150), (NOTE_E5, 150), (NOTE_C5, 150), (NOTE_G4, 300)],
