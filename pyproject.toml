@@ -1,0 +1,23 @@
+[project]
+name = "krosmosis"
+version = "0.1.0"
+description = "ESP32 MicroPython controller for reverse osmosis water filtration system"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "mpremote",                  # Tool to interact with MicroPython devices
+    "ruff",                      # Linting
+    "micropython-esp32-stubs",   # Type stubs for IDE autocompletion
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W"]
+# Ignore imports that only exist in MicroPython
+ignore = ["F401"]

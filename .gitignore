@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Development tools
+.ruff_cache/
+
+# Project secrets
+config.py

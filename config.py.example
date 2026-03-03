@@ -1,0 +1,64 @@
+# Krosmosis Configuration
+# Copy this file to config.py and update with your values
+
+# ==========================================
+# WiFi Settings
+# ==========================================
+WIFI_SSID = "YourNetworkName"
+WIFI_PASSWORD = "YourPassword"
+WIFI_TIMEOUT = 10  # Connection timeout in seconds
+WIFI_RECONNECT_INTERVAL = 60  # Check WiFi every N seconds
+
+# WebREPL Settings (for OTA updates)
+WEBREPL_PASSWORD = "micropython"  # 4-9 characters
+
+# ==========================================
+# Hardware Pin Configuration
+# ==========================================
+
+# I2C LCD Display
+PIN_LCD_SCL = 22
+PIN_LCD_SDA = 21
+LCD_I2C_ADDR = 0x27  # Common addresses: 0x27 or 0x3F
+LCD_ROWS = 4
+LCD_COLS = 20
+
+# Relay Outputs
+PIN_PUMP = 12
+PIN_INLET_VALVE = 13
+PIN_FLUSH_VALVE = 14
+
+# Buzzer
+PIN_BUZZER = 32
+
+# Sensor Inputs (active low / NPN opto-isolated)
+PIN_LOW_PRESSURE = 25
+PIN_HIGH_PRESSURE = 26
+PIN_LEAK_SENSOR = 27
+
+# TDS Sensor (analog)
+PIN_TDS_SENSOR = 34
+
+# ==========================================
+# TDS Calibration
+# ==========================================
+# Formula: PPM = ADC_VALUE * TDS_FACTOR + TDS_OFFSET
+TDS_FACTOR = 0.5
+TDS_OFFSET = 0
+
+# ==========================================
+# Flush Cycle Settings
+# ==========================================
+FLUSH_INTERVAL = 3600  # Flush every N seconds of production time (1 hour)
+FLUSH_DURATION = 30  # Flush duration in seconds
+
+# ==========================================
+# Watchdog Settings
+# ==========================================
+WATCHDOG_TIMEOUT = 30000  # Watchdog timeout in milliseconds (30 seconds)
+
+# ==========================================
+# Prometheus Metrics Settings
+# ==========================================
+METRICS_ENABLED = True  # Enable/disable metrics endpoint
+METRICS_PORT = 8080  # HTTP port for /metrics endpoint
