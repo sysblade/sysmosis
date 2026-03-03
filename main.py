@@ -1,10 +1,11 @@
 from machine import Pin, ADC, SoftI2C, WDT, PWM, Timer
 from esp8266_i2c_lcd import I2cLcd
+from metrics import handle_metrics
 import network
 import time
 
 # Ensure alarms.py exists on your ESP32 root with the non-blocking logic
-from alarms import set_alarm, update_alarm_async, ALARMS, get_current_alarm
+from alarms import trigger_alarm, clear_alarm, update_alarm_async, ALARMS
 
 # ==========================================
 # 1. CONFIGURATION (Restored from your code)
@@ -91,7 +92,6 @@ def get_tds():
 # ==========================================
 # 5. MAIN LOGIC
 # ==========================================
-set_alarm('BOOT')
 update_display("RO SYSTEM v1.0", "Initializing...", "Sensors: OK", "Ready.")
 
 wdt = WDT(timeout=get_config("WATCHDOG_TIMEOUT", 30000))
@@ -99,23 +99,29 @@ system_active = False
 
 while True:
     wdt.feed()
-    update_alarm_async() # Non-blocking buzzer/LED
+    update_alarm_async() # Handles the alternating sounds and LED
+    handle_metrics()
 
-    # 5.1 WiFi & Metrics (Restored)
-    # Note: connect_wifi() and check_wifi_reconnect() should be imported or defined
-    # I'm using your logic from previous prompt
-    if time.time() - last_wifi_check > get_config("WIFI_RECONNECT_INTERVAL", 60):
-        # Insert your connect_wifi() logic here
-        last_wifi_check = time.time()
-
-    # 5.2 Leak Management
+    # 1. LEAK LOGIC (Critical)
     if leak_detected or leak.value() == 0:
-        set_alarm('FLOODING')
-        update_display("!!! EMERGENCY !!!", "LEAK DETECTED!", "Water Cut Off.", "Manual Reset Req.")
+        trigger_alarm('FLOODING')
+        # Emergency Shutdown logic...
         while True:
             wdt.feed()
             update_alarm_async()
-            time.sleep_ms(50)
+            time.sleep_ms(10)
+
+    # 2. SOURCE WATER LOGIC
+    if lps.value() == 1: # No pressure
+        trigger_alarm('LOW_PRESSURE')
+    else:
+        clear_alarm('LOW_PRESSURE')
+
+    # 3. TDS LOGIC
+    if get_tds() > get_config("TDS_THRESHOLD", 100):
+        trigger_alarm('TDS_HIGH')
+    else:
+        clear_alarm('TDS_HIGH')
 
     # 5.3 Sensor Reading & Production Tracking
     now = time.time()
@@ -129,7 +135,6 @@ while True:
     # 5.4 Production Logic
     if source_water and faucet_open:
         if not system_active:
-            set_alarm('OFF') # Clear standby alarms
             update_display("STATUS: STARTING", "Opening Inlet...", "", "")
             inlet_v.value(1)
             time.sleep(1)
@@ -147,14 +152,6 @@ while True:
             system_state = 0
             metrics_production_total += production_time
             production_time = 0
-
-    # 5.5 Secondary Alarms (Only if not in Emergency)
-    if not source_water and system_state != 3:
-        set_alarm('LOW_PRESSURE')
-    elif current_tds > get_config("TDS_ALARM_THRESHOLD", 100):
-        set_alarm('TDS_HIGH')
-    elif system_state == 0:
-        set_alarm('OFF')
 
     # 5.6 Display Refresh
     if system_active:
