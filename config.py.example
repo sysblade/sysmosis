@@ -49,8 +49,13 @@ TDS_OFFSET = 0
 # ==========================================
 # Flush Cycle Settings
 # ==========================================
-FLUSH_INTERVAL = 3600  # Flush every N seconds of production time (1 hour)
-FLUSH_DURATION = 30  # Flush duration in seconds
+FLUSH_STARTUP_DURATION = 20           # seconds, on every boot
+FLUSH_INACTIVITY_INTERVAL_MIN = 86400    # 24h standby before flush
+FLUSH_INACTIVITY_INTERVAL_MAX = 172800   # 48h max standby before flush
+FLUSH_INACTIVITY_DURATION = 60        # seconds
+FLUSH_PRODUCTION_INTERVAL = 0         # 0 = disabled; set e.g. 3600 to flush after 1h production
+FLUSH_PRODUCTION_DURATION = 30        # seconds
+FLUSH_MANUAL_DURATION = 30            # seconds, when triggered from web UI
 
 # ==========================================
 # Watchdog Settings
@@ -62,3 +67,9 @@ WATCHDOG_TIMEOUT = 30000  # Watchdog timeout in milliseconds (30 seconds)
 # ==========================================
 METRICS_ENABLED = True  # Enable/disable metrics endpoint
 METRICS_PORT = 8080  # HTTP port for /metrics endpoint
+
+# ==========================================
+# Web Interface Settings
+# ==========================================
+WEB_ENABLED = True    # Enable HTTP web UI (requires WiFi)
+WEB_PORT = 80         # HTTP port

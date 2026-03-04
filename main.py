@@ -1,7 +1,5 @@
 from machine import Pin, ADC, SoftI2C, WDT, PWM, Timer
 from esp8266_i2c_lcd import I2cLcd
-from metrics import handle_metrics
-import network
 import time
 import random
 
@@ -65,6 +63,13 @@ flush_duration = 0
 last_standby_start = time.time()
 next_inactivity_flush_in = 0  # seconds until next inactivity flush (set at boot)
 
+web_server = None
+wifi_ip = ""
+source_water = False
+faucet_open = False
+current_tds = 0
+lcd_lines = ["", "", "", ""]
+
 # ==========================================
 # 4. HARDWARE INIT
 # ==========================================
@@ -95,14 +100,16 @@ def _emergency_shutdown(pin):
 leak.irq(trigger=Pin.IRQ_FALLING, handler=_emergency_shutdown)
 
 def update_display(l1="", l2="", l3="", l4=""):
+    global lcd_lines
+    lcd_lines = [l1.ljust(20), l2.ljust(20), l3.ljust(20), l4.ljust(20)]
     lcd.move_to(0, 0)
-    lcd.putstr(l1.ljust(20))
+    lcd.putstr(lcd_lines[0])
     lcd.move_to(0, 1)
-    lcd.putstr(l2.ljust(20))
+    lcd.putstr(lcd_lines[1])
     lcd.move_to(0, 2)
-    lcd.putstr(l3.ljust(20))
+    lcd.putstr(lcd_lines[2])
     lcd.move_to(0, 3)
-    lcd.putstr(l4.ljust(20))
+    lcd.putstr(lcd_lines[3])
 
 def get_tds():
     val = tds_sensor.read()
@@ -167,16 +174,200 @@ def exit_maintenance():
 _schedule_next_inactivity_flush()
 
 # ==========================================
+# 6b. STATE NAMES
+# ==========================================
+_STATE_NAMES = {
+    State.STANDBY:     "STANDBY",
+    State.RUNNING:     "RUNNING",
+    State.FLUSHING:    "FLUSHING",
+    State.EMERGENCY:   "EMERGENCY",
+    State.MAINTENANCE: "MAINTENANCE",
+}
+
+# ==========================================
+# 6c. WEB CALLBACKS
+# ==========================================
+def _get_web_status():
+    now = time.time()
+    remaining = 0
+    if system_state == State.FLUSHING:
+        remaining = max(0, int(flush_duration - (now - flush_start_time)))
+    return {
+        "state": _STATE_NAMES.get(system_state, "UNKNOWN"),
+        "state_id": system_state,
+        "source_water": source_water,
+        "faucet_open": faucet_open,
+        "tds_ppm": current_tds,
+        "wifi_connected": wifi_connected,
+        "uptime_s": int(now - start_time),
+        "production_time_s": int(production_time),
+        "flush_reason": flush_reason,
+        "flush_remaining_s": remaining,
+        "flush_duration_s": flush_duration,
+        "pump": bool(pump.value()),
+        "inlet_valve": bool(inlet_v.value()),
+        "flush_valve": bool(flush_v.value()),
+        "lps": lps.value() == 1,
+        "hps": hps.value() == 1,
+        "leak_detected": leak_detected,
+        "flush_cycles_total": metrics_flush_cycles,
+        "production_total_s": int(metrics_production_total + production_time),
+        "ip": wifi_ip,
+        "lcd": lcd_lines,
+    }
+
+
+def _do_web_control(action, params):
+    if action == "maintenance_toggle":
+        if system_state == State.EMERGENCY:
+            return (False, "Cannot toggle maintenance during emergency")
+        if system_state == State.MAINTENANCE:
+            exit_maintenance()
+        else:
+            enter_maintenance()
+        return (True, "OK")
+    if action == "flush_start":
+        if system_state != State.STANDBY:
+            return (False, "Flush only allowed from STANDBY state")
+        start_flush("Manual", get_config("FLUSH_MANUAL_DURATION", 30))
+        return (True, "OK")
+    if action == "reset":
+        import machine
+        machine.reset()
+    if action == "pump_on":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        pump.value(1)
+        return (True, "OK")
+    if action == "pump_off":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        pump.value(0)
+        return (True, "OK")
+    if action == "inlet_on":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        inlet_v.value(1)
+        return (True, "OK")
+    if action == "inlet_off":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        inlet_v.value(0)
+        return (True, "OK")
+    if action == "flush_valve_on":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        flush_v.value(1)
+        return (True, "OK")
+    if action == "flush_valve_off":
+        if system_state != State.MAINTENANCE:
+            return (False, "Relay control only in MAINTENANCE mode")
+        flush_v.value(0)
+        return (True, "OK")
+    return (False, "Unknown action: " + action)
+
+
+# ==========================================
+# 6d. WIFI / SERVER INIT
+# ==========================================
+def connect_wifi():
+    global wifi_connected, metrics_server, web_server, wifi_ip
+    ssid = get_config("WIFI_SSID", None)
+    if not ssid:
+        return
+    import network
+    import webrepl
+    from metrics import create_system_collector, MetricsServer
+    from webserver import WebServer
+    wlan = network.WLAN(network.STA_IF)
+    wlan.active(True)
+    wlan.connect(ssid, get_config("WIFI_PASSWORD", ""))
+    timeout = get_config("WIFI_TIMEOUT", 10)
+    t = time.time()
+    while not wlan.isconnected():
+        wdt.feed()
+        time.sleep_ms(200)
+        if time.time() - t > timeout:
+            print("WiFi: Connection timed out")
+            return
+    wifi_connected = True
+    wifi_ip = wlan.ifconfig()[0]
+    print("WiFi: Connected, IP=" + wifi_ip)
+    webrepl.start(password=get_config("WEBREPL_PASSWORD", "micropython"))
+    if get_config("METRICS_ENABLED", True):
+        metrics_server = MetricsServer(port=get_config("METRICS_PORT", 8080))
+        collector = create_system_collector(
+            get_state=lambda: {
+                "system_state": system_state,
+                "production_time": production_time,
+                "wifi_connected": wifi_connected,
+                "time_to_flush": max(
+                    0, next_inactivity_flush_in - int(time.time() - last_standby_start)
+                ),
+            },
+            get_tds=lambda: current_tds,
+            get_sensors=lambda: {
+                "lps": lps.value(),
+                "hps": hps.value(),
+                "leak": 1 if leak_detected else 0,
+            },
+            get_relays=lambda: {
+                "pump": pump.value(),
+                "inlet_v": inlet_v.value(),
+                "flush_v": flush_v.value(),
+            },
+            get_counters=lambda: {
+                "production_total": metrics_production_total + production_time,
+                "flush_cycles": metrics_flush_cycles,
+                "wifi_reconnects": metrics_wifi_reconnects,
+            },
+            start_time=start_time,
+        )
+        metrics_server.register_collector(collector)
+        metrics_server.start()
+    if get_config("WEB_ENABLED", True):
+        web_server = WebServer(port=get_config("WEB_PORT", 80))
+        web_server.register_callbacks(_get_web_status, _do_web_control)
+        web_server.start()
+        print("WebUI: http://" + wifi_ip + "/")
+
+
+def check_wifi_reconnect():
+    global wifi_connected, last_wifi_check, metrics_wifi_reconnects
+    ssid = get_config("WIFI_SSID", None)
+    if not ssid:
+        return
+    now = time.time()
+    if now - last_wifi_check < get_config("WIFI_RECONNECT_INTERVAL", 60):
+        return
+    last_wifi_check = now
+    import network
+    wlan = network.WLAN(network.STA_IF)
+    if not wlan.isconnected():
+        wifi_connected = False
+        metrics_wifi_reconnects += 1
+        print("WiFi: Reconnecting...")
+        connect_wifi()
+
+
+# ==========================================
 # 7. MAIN LOGIC
 # ==========================================
 update_display("RO SYSTEM v1.0", "Initializing...", "Sensors: OK", "Ready.")
 
 wdt = WDT(timeout=get_config("WATCHDOG_TIMEOUT", 30000))
 
+connect_wifi()
+last_wifi_check = time.time()
+
 while True:
     wdt.feed()
     update_alarm_async()
-    handle_metrics()
+    check_wifi_reconnect()
+    if metrics_server:
+        metrics_server.handle_request()
+    if web_server:
+        web_server.handle_request()
 
     # 1. LEAK LOGIC (Critical)
     if leak_detected or leak.value() == 0:
