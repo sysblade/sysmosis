@@ -180,6 +180,7 @@ def create_system_collector(
                     {"labels": {"state": "running"}, "value": 1 if system_state == 1 else 0},
                     {"labels": {"state": "flushing"}, "value": 1 if system_state == 2 else 0},
                     {"labels": {"state": "emergency"}, "value": 1 if system_state == 3 else 0},
+                    {"labels": {"state": "maintenance"}, "value": 1 if system_state == 4 else 0},
                 ],
             },
             "krosmosis_tds_ppm": {
