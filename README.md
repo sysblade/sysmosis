@@ -98,15 +98,15 @@ uv run pyright main.py metrics.py
 
 ### USB Upload
 
-Upload the scripts to the ESP32:
+Upload all files to the ESP32 using the deploy script:
 
 ```bash
-mpremote connect /dev/ttyUSB0 cp main.py :main.py
-mpremote connect /dev/ttyUSB0 cp webserver.py :webserver.py
-mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
-mpremote connect /dev/ttyUSB0 cp alarms.py :alarms.py
-mpremote connect /dev/ttyUSB0 reset
+uv run deploy.py
+# or specify a different port:
+uv run deploy.py /dev/ttyACM0
 ```
+
+The script uploads `main.py`, `webserver.py`, `metrics.py`, `alarms.py`, and all files in `static/`. If `config.py` exists locally it is included automatically.
 
 ### WiFi / OTA Setup
 
@@ -129,13 +129,10 @@ WIFI_TIMEOUT = 10
 **2. Upload all files via USB:**
 
 ```bash
-mpremote connect /dev/ttyUSB0 cp config.py :config.py
-mpremote connect /dev/ttyUSB0 cp main.py :main.py
-mpremote connect /dev/ttyUSB0 cp webserver.py :webserver.py
-mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
-mpremote connect /dev/ttyUSB0 cp alarms.py :alarms.py
-mpremote connect /dev/ttyUSB0 reset
+uv run deploy.py
 ```
+
+If `config.py` exists it is included automatically. To use a different port: `uv run deploy.py /dev/ttyACM0`.
 
 **3. Subsequent uploads over WiFi (mpremote):**
 
