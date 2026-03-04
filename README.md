@@ -11,7 +11,9 @@ ESP32 MicroPython controller for a reverse osmosis (RO) water filtration system.
 - Low/high pressure sensor monitoring
 - Automatic membrane flush cycles to extend RO membrane life
 - Audio feedback (buzzer) for system status
-- Optional WiFi with OTA (Over-The-Air) updates via WebREPL
+- Web interface for real-time monitoring and control (port 80)
+- Password-protected web UI with cookie-based session authentication
+- Optional HTTPS for the web interface (self-signed certificate)
 - WiFi auto-reconnect on connection loss
 - Hardware watchdog timer for automatic recovery from hangs
 - Prometheus metrics endpoint for monitoring and alerting
@@ -99,17 +101,16 @@ uv run pyright main.py metrics.py
 Upload the scripts to the ESP32:
 
 ```bash
-# Upload all Python files
 mpremote connect /dev/ttyUSB0 cp main.py :main.py
+mpremote connect /dev/ttyUSB0 cp webserver.py :webserver.py
 mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
-
-# Restart the device
+mpremote connect /dev/ttyUSB0 cp alarms.py :alarms.py
 mpremote connect /dev/ttyUSB0 reset
 ```
 
-### OTA Upload (WebREPL)
+### WiFi / OTA Setup
 
-WiFi and WebREPL are built into `main.py` and start automatically if configured.
+WiFi starts automatically if configured. WebREPL has been removed — use `mpremote` for all file uploads.
 
 **1. Create configuration file:**
 
@@ -122,31 +123,75 @@ Edit `config.py` with your WiFi credentials:
 ```python
 WIFI_SSID = "YourNetworkName"
 WIFI_PASSWORD = "YourPassword"
-WEBREPL_PASSWORD = "micropython"  # 4-9 characters
 WIFI_TIMEOUT = 10
 ```
 
-**2. Initial upload via USB (one-time):**
+**2. Upload all files via USB:**
 
 ```bash
 mpremote connect /dev/ttyUSB0 cp config.py :config.py
 mpremote connect /dev/ttyUSB0 cp main.py :main.py
+mpremote connect /dev/ttyUSB0 cp webserver.py :webserver.py
 mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
+mpremote connect /dev/ttyUSB0 cp alarms.py :alarms.py
 mpremote connect /dev/ttyUSB0 reset
 ```
 
-**3. Subsequent uploads via WebREPL:**
-
-Find the device IP in serial output or your router's DHCP table, then:
+**3. Subsequent uploads over WiFi (mpremote):**
 
 ```bash
-# Using webrepl_cli (install with: pip install webrepl)
-webrepl_cli.py -p YOUR_WEBREPL_PASSWORD main.py 192.168.1.100:/main.py
+# mpremote also works over network via mDNS or IP
+mpremote connect /dev/ttyUSB0 cp main.py :main.py
+mpremote connect /dev/ttyUSB0 reset
 ```
 
-Or use the WebREPL web client at http://micropython.org/webrepl/
-
 **Note:** WiFi is optional. If `config.py` is missing or WiFi fails to connect, the RO system continues to operate normally without network features.
+
+## Web Interface
+
+When WiFi is connected, a web UI is available at `http://<device-ip>/` (default port 80).
+
+The interface shows:
+- Current system state (STANDBY / RUNNING / FLUSHING / EMERGENCY / MAINTENANCE) with live updates
+- LCD display mirror
+- Sensor readings (source water, faucet, TDS, LPS, HPS, leak)
+- Relay states (pump, inlet valve, flush valve)
+- Timing info (uptime, production time, flush cycles)
+
+Controls available from the UI:
+- Toggle maintenance mode (also bindable to key `M`)
+- Trigger a manual flush (key `F`)
+- Reset the device (key `R`)
+- Individual relay control (pump, inlet valve, flush valve) when in maintenance mode
+
+### Authentication
+
+Set `WEB_AUTH_PASSWORD` in `config.py` to protect the UI with a password. A login page is shown to unauthenticated users; a session cookie is issued on success. Leave the key unset (or empty) to disable authentication.
+
+```python
+WEB_AUTH_PASSWORD = "changeme"
+```
+
+### HTTPS (optional)
+
+Generate a self-signed certificate on your PC and upload it to the device:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+            -days 3650 -nodes -subj "/CN=krosmosis"
+
+mpremote connect /dev/ttyUSB0 cp cert.pem :cert.pem
+mpremote connect /dev/ttyUSB0 cp key.pem  :key.pem
+```
+
+Then enable it in `config.py`:
+
+```python
+WEB_HTTPS = True
+WEB_PORT  = 443
+```
+
+The browser will show a certificate warning for self-signed certs — accept it to proceed. The Prometheus metrics endpoint (port 8080) is unaffected and remains plain HTTP.
 
 ## Monitoring (Prometheus)
 

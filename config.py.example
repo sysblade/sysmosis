@@ -9,9 +9,6 @@ WIFI_PASSWORD = "YourPassword"
 WIFI_TIMEOUT = 10  # Connection timeout in seconds
 WIFI_RECONNECT_INTERVAL = 60  # Check WiFi every N seconds
 
-# WebREPL Settings (for OTA updates)
-WEBREPL_PASSWORD = "micropython"  # 4-9 characters
-
 # ==========================================
 # Hardware Pin Configuration
 # ==========================================
@@ -72,4 +69,21 @@ METRICS_PORT = 8080  # HTTP port for /metrics endpoint
 # Web Interface Settings
 # ==========================================
 WEB_ENABLED = True    # Enable HTTP web UI (requires WiFi)
-WEB_PORT = 80         # HTTP port
+WEB_PORT = 80         # set to 443 when WEB_HTTPS = True
+
+# Authentication (leave unset or empty to disable)
+WEB_AUTH_PASSWORD = "changeme"   # password for the web UI login page
+
+# HTTPS (optional — requires cert.pem + key.pem on the device filesystem)
+# Generate on your PC:
+#   openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
+#               -days 3650 -nodes -subj "/CN=krosmosis"
+# Upload to device:
+#   mpremote connect /dev/ttyUSB0 cp cert.pem :cert.pem
+#   mpremote connect /dev/ttyUSB0 cp key.pem  :key.pem
+WEB_HTTPS = False
+WEB_CERT_FILE = "cert.pem"
+WEB_KEY_FILE  = "key.pem"
+
+# NOTE: WebREPL has been removed. Use mpremote for OTA file uploads:
+#   mpremote connect /dev/ttyUSB0 cp <file> :<file>

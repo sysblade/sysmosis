@@ -276,7 +276,6 @@ def connect_wifi():
     if not ssid:
         return
     import network
-    import webrepl
     from metrics import create_system_collector, MetricsServer
     from webserver import WebServer
     wlan = network.WLAN(network.STA_IF)
@@ -293,7 +292,6 @@ def connect_wifi():
     wifi_connected = True
     wifi_ip = wlan.ifconfig()[0]
     print("WiFi: Connected, IP=" + wifi_ip)
-    webrepl.start(password=get_config("WEBREPL_PASSWORD", "micropython"))
     if get_config("METRICS_ENABLED", True):
         metrics_server = MetricsServer(port=get_config("METRICS_PORT", 8080))
         collector = create_system_collector(
@@ -326,10 +324,23 @@ def connect_wifi():
         metrics_server.register_collector(collector)
         metrics_server.start()
     if get_config("WEB_ENABLED", True):
-        web_server = WebServer(port=get_config("WEB_PORT", 80))
+        _web_port = get_config("WEB_PORT", 443 if get_config("WEB_HTTPS", False) else 80)
+        web_server = WebServer(port=_web_port)
         web_server.register_callbacks(_get_web_status, _do_web_control)
+
+        _auth_pw = get_config("WEB_AUTH_PASSWORD", None)
+        if _auth_pw:
+            web_server.configure_auth(_auth_pw)
+
+        if get_config("WEB_HTTPS", False):
+            web_server.configure_https(
+                get_config("WEB_CERT_FILE", "cert.pem"),
+                get_config("WEB_KEY_FILE", "key.pem"),
+            )
+
         web_server.start()
-        print("WebUI: http://" + wifi_ip + "/")
+        _scheme = "https" if get_config("WEB_HTTPS", False) else "http"
+        print("WebUI: " + _scheme + "://" + wifi_ip + "/")
 
 
 def check_wifi_reconnect():
