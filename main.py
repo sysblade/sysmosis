@@ -2,6 +2,7 @@ from machine import Pin, ADC, SoftI2C, WDT, PWM, Timer
 from esp8266_i2c_lcd import I2cLcd
 import time
 import random
+import json
 
 # Ensure alarms.py exists on your ESP32 root with the non-blocking logic
 from alarms import trigger_alarm, clear_alarm, update_alarm_async, ALARMS
@@ -23,18 +24,21 @@ def get_config(name, default):
 # 2. STATE
 # ==========================================
 class State:
-    STANDBY     = 0
-    RUNNING     = 1
-    FLUSHING    = 2
-    EMERGENCY   = 3
-    MAINTENANCE = 4
+    DISABLED      = 0
+    STARTUP_DELAY = 1
+    STANDBY       = 2
+    RUNNING       = 3
+    FLUSHING      = 4
+    EMERGENCY     = 5
+    MAINTENANCE   = 6
 
 _STATE_NAMES = {
-    State.STANDBY:     "STANDBY",
-    State.RUNNING:     "RUNNING",
-    State.FLUSHING:    "FLUSHING",
-    State.EMERGENCY:   "EMERGENCY",
-    State.MAINTENANCE: "MAINTENANCE",
+    State.STANDBY:       "STANDBY",
+    State.RUNNING:       "RUNNING",
+    State.FLUSHING:      "FLUSHING",
+    State.EMERGENCY:     "EMERGENCY",
+    State.MAINTENANCE:   "MAINTENANCE",
+    State.STARTUP_DELAY: "STARTUP DELAY"
 }
 
 # ==========================================
@@ -48,7 +52,7 @@ class ROController:
         self.last_wifi_check = 0
         self.production_time = 0
         self.last_flush_time = 0
-        self.system_state = State.STANDBY
+        self.system_state = State.STARTUP_DELAY
         self.metrics_production_total = 0
         self.metrics_flush_cycles = 0
         self.metrics_wifi_reconnects = 0
@@ -68,6 +72,10 @@ class ROController:
         self.current_tds = 0
         self.lcd_lines = ["", "", "", ""]
         self.wdt = None
+        self.persistent_state = {
+            "state": None
+        }
+        self.state_file = "state.json"
 
         # Hardware init
         i2c = SoftI2C(
@@ -111,6 +119,32 @@ class ROController:
     def get_tds(self):
         val = self.tds_sensor.read()
         return int(val * get_config("TDS_FACTOR", 0.5) + get_config("TDS_OFFSET", 0))
+
+    def startup_delay(self, delay=30):
+        for i in range(delay):
+            self.update_display(f"STARTUP DELAY: {i}s/{delay}s")
+            time.sleep(1)
+
+    def load_state(self):
+        """Load state from flash memory"""
+        try:
+            with open(self.state_file, "r", encoding="ascii") as f:
+                loaded_state = json.load(f)
+                self.persistent_state.update(loaded_state)
+                print("Loaded state from JSON persistence")
+        except (OSError, ValueError) as e:
+            print("Failure to load state, using defaults")
+            print(e)
+            self.save_state()
+
+    def save_state(self):
+        """Writes the current state to flash memory."""
+        try:
+            with open(self.state_file, "w", encoding="ascii") as f:
+                json.dump(self.persistent_state, f)
+                print("State saved to flash.")
+        except OSError:
+            print("ERROR: Could not write to flash memory!")
 
     # ==========================================
     # FLUSH HELPERS
