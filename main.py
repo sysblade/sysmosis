@@ -20,6 +20,14 @@ def get_config(name, default):
     return getattr(cfg, name, default)
 
 # ==========================================
+# LOGGING
+# ==========================================
+def log(tag, msg):
+    """Print a timestamped log line to the serial REPL."""
+    ms = time.ticks_ms()
+    print("[{:8d}] [{}] {}".format(ms, tag, msg))
+
+# ==========================================
 # 2. STATE
 # ==========================================
 class State:
@@ -68,14 +76,21 @@ class ROController:
         self.current_tds = 0
         self.lcd_lines = ["", "", "", ""]
         self.wdt = None
+        self._spinner_idx = 0
+        self._last_spinner_ms = 0
 
         # Hardware init
+        # Use 100 kHz — many LCD I2C backpacks are unreliable at higher speeds
         i2c = SoftI2C(
             scl=Pin(get_config("PIN_LCD_SCL", 22)),
             sda=Pin(get_config("PIN_LCD_SDA", 21)),
-            freq=400000,
+            freq=100000,
         )
+        log("LCD", "Scanning I2C bus...")
+        devices = i2c.scan()
+        log("LCD", "Found devices: {}".format([hex(d) for d in devices]))
         self.lcd = I2cLcd(i2c, get_config("LCD_I2C_ADDR", 0x27), 4, 20)
+        log("LCD", "Initialized")
         self.pump    = Pin(get_config("PIN_PUMP", 12),          Pin.OUT, value=0)
         self.inlet_v = Pin(get_config("PIN_INLET_VALVE", 13),   Pin.OUT, value=0)
         self.flush_v = Pin(get_config("PIN_FLUSH_VALVE", 14),   Pin.OUT, value=0)
@@ -86,6 +101,7 @@ class ROController:
         self.tds_sensor.atten(ADC.ATTN_11DB)
         self.leak.irq(trigger=Pin.IRQ_FALLING, handler=self._emergency_shutdown)
         self._schedule_next_inactivity_flush()
+        log("ROC", "Hardware initialized")
 
     # ==========================================
     # IRQ & HELPERS
@@ -97,8 +113,28 @@ class ROController:
         self.leak_detected = True
         self.system_state = State.EMERGENCY
 
+    _SPINNER = [" ", chr(0b10100101)]
+
+    @staticmethod
+    def _pad(s, width=20):
+        # MicroPython ESP32 doesn't support str.ljust()
+        s = s[:width]
+        return s + " " * (width - len(s))
+
     def update_display(self, l1="", l2="", l3="", l4=""):
-        self.lcd_lines = [l1.ljust(20), l2.ljust(20), l3.ljust(20), l4.ljust(20)]
+        # Advance spinner every 500 ms — last char of line 4 as a heartbeat indicator
+        now_ms = time.ticks_ms()
+        if time.ticks_diff(now_ms, self._last_spinner_ms) >= 500:
+            self._spinner_idx = (self._spinner_idx + 1) % len(self._SPINNER)
+            self._last_spinner_ms = now_ms
+        spinner = self._SPINNER[self._spinner_idx]
+
+        self.lcd_lines = [
+            self._pad(l1),
+            self._pad(l2),
+            self._pad(l3),
+            self._pad(l4, 19) + spinner,  # last char reserved for heartbeat
+        ]
         self.lcd.move_to(0, 0)
         self.lcd.putstr(self.lcd_lines[0])
         self.lcd.move_to(0, 1)
@@ -123,6 +159,7 @@ class ROController:
 
     def start_flush(self, reason, duration):
         """Stop any active production and start a flush cycle."""
+        log("FLUSH", "Starting: reason={} duration={}s".format(reason, duration))
         self.pump.value(0)
         self.inlet_v.value(0)
         time.sleep_ms(500)
@@ -136,6 +173,7 @@ class ROController:
 
     def stop_flush(self):
         """End the current flush cycle and return to standby."""
+        log("FLUSH", "Complete (total cycles={})".format(self.metrics_flush_cycles + 1))
         self.pump.value(0)
         self.flush_v.value(0)
         self.system_state = State.STANDBY
@@ -145,6 +183,7 @@ class ROController:
 
     def enter_maintenance(self):
         """Stop all automated hardware and enter maintenance mode for manual control."""
+        log("ROC", "Entering maintenance mode")
         if self.system_state == State.RUNNING:
             self.pump.value(0)
             time.sleep(1)
@@ -159,6 +198,7 @@ class ROController:
     def exit_maintenance(self):
         """Return to standby from maintenance mode."""
         if self.system_state == State.MAINTENANCE:
+            log("ROC", "Exiting maintenance mode")
             self.system_state = State.STANDBY
             self.last_standby_start = time.time()  # Reset inactivity timer
 
@@ -249,10 +289,12 @@ class ROController:
     def connect_wifi(self):
         ssid = get_config("WIFI_SSID", None)
         if not ssid:
+            log("WIFI", "No SSID configured, skipping")
             return
         import network
         from metrics import create_system_collector, MetricsServer
         from webserver import WebServer
+        log("WIFI", "Connecting to '{}'...".format(ssid))
         wlan = network.WLAN(network.STA_IF)
         wlan.active(True)
         wlan.connect(ssid, get_config("WIFI_PASSWORD", ""))
@@ -262,11 +304,11 @@ class ROController:
             self.wdt.feed()
             time.sleep_ms(200)
             if time.time() - t > timeout:
-                print("WiFi: Connection timed out")
+                log("WIFI", "Connection timed out")
                 return
         self.wifi_connected = True
         self.wifi_ip = wlan.ifconfig()[0]
-        print("WiFi: Connected, IP=" + self.wifi_ip)
+        log("WIFI", "Connected, IP={}".format(self.wifi_ip))
         if get_config("METRICS_ENABLED", True):
             self.metrics_server = MetricsServer(port=get_config("METRICS_PORT", 8080))
             collector = create_system_collector(
@@ -316,7 +358,7 @@ class ROController:
 
             self.web_server.start()
             _scheme = "https" if get_config("WEB_HTTPS", False) else "http"
-            print("WebUI: " + _scheme + "://" + self.wifi_ip + "/")
+            log("WEB", "UI at {}://{}:{}/".format(_scheme, self.wifi_ip, _web_port))
 
     def check_wifi_reconnect(self):
         ssid = get_config("WIFI_SSID", None)
@@ -331,17 +373,30 @@ class ROController:
         if not wlan.isconnected():
             self.wifi_connected = False
             self.metrics_wifi_reconnects += 1
-            print("WiFi: Reconnecting...")
+            log("WIFI", "Dropped, reconnecting (attempt {})...".format(self.metrics_wifi_reconnects))
             self.connect_wifi()
 
     # ==========================================
     # MAIN LOOP
     # ==========================================
+    def _splash(self, l1, l2, l3="", l4=""):
+        """Show a splash screen and hold for STARTUP_MSG_DELAY_MS milliseconds."""
+        self.update_display(l1, l2, l3, l4)
+        delay = get_config("STARTUP_MSG_DELAY_MS", 2000)
+        log("ROC", "Splash: '{}' ({}ms)".format(l1, delay))
+        time.sleep_ms(delay)
+
     def run(self):
-        self.update_display("RO SYSTEM v1.0", "Initializing...", "Sensors: OK", "Ready.")
+        log("ROC", "Starting RO System v1.0")
+        self._splash("RO SYSTEM v1.0", "Initializing...", "Sensors: OK", "Ready.")
         self.wdt = WDT(timeout=get_config("WATCHDOG_TIMEOUT", 30000))
+        log("ROC", "WDT set to {}ms".format(get_config("WATCHDOG_TIMEOUT", 30000)))
+        self._splash("Connecting WiFi...", "Please wait...")
         self.connect_wifi()
         self.last_wifi_check = time.time()
+        log("ROC", "Entering main loop")
+
+        _last_sensor_log = 0
 
         while True:
             self.wdt.feed()
@@ -354,6 +409,13 @@ class ROController:
 
             # 1. LEAK LOGIC (Critical)
             if self.leak_detected or self.leak.value() == 0:
+                log("LEAK", "DETECTED — emergency shutdown, all outputs OFF")
+                self.update_display(
+                    "!! LEAK DETECTED !!",
+                    "ALL FLOW STOPPED",
+                    "Check system and",
+                    "power-cycle to reset",
+                )
                 trigger_alarm('LEAK')
                 while True:
                     self.wdt.feed()
@@ -380,6 +442,15 @@ class ROController:
             self.source_water = (self.lps.value() == 0)
             self.faucet_open = (self.hps.value() == 0)
             self.current_tds = self.get_tds()
+
+            # Periodic sensor log every 10 s
+            _now_ms = time.ticks_ms()
+            if time.ticks_diff(_now_ms, _last_sensor_log) >= 10000:
+                _last_sensor_log = _now_ms
+                log("SENS", "state={} src_water={} faucet={} tds={} lps={} hps={}".format(
+                    _STATE_NAMES.get(self.system_state, "?"),
+                    self.source_water, self.faucet_open, self.current_tds,
+                    self.lps.value(), self.hps.value()))
 
             # 5. MAINTENANCE MODE: bypass all automation
             if self.system_state == State.MAINTENANCE:
@@ -434,6 +505,7 @@ class ROController:
             # 7. PRODUCTION LOGIC
             if self.source_water and self.faucet_open:
                 if self.system_state != State.RUNNING:
+                    log("PROD", "Starting production")
                     self.update_display("STATUS: STARTING", "Opening Inlet...", "", "")
                     self.inlet_v.value(1)
                     time.sleep(1)
@@ -443,6 +515,9 @@ class ROController:
 
             elif not self.faucet_open or not self.source_water:
                 if self.system_state == State.RUNNING:
+                    log("PROD", "Stopping production (session={}s total={}s)".format(
+                        int(self.production_time),
+                        int(self.metrics_production_total + self.production_time)))
                     self.pump.value(0)
                     time.sleep(1)
                     self.inlet_v.value(0)
@@ -469,4 +544,9 @@ class ROController:
                 )
 
 
-ROController().run()
+try:
+    ROController().run()
+except Exception as e:
+    import sys
+    print("[FATAL] Uncaught exception: {}".format(e))
+    sys.print_exception(e)

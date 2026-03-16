@@ -34,6 +34,7 @@ ROController::ROController()
     , _currentTds(0)
     , _flushCycles(0)
     , _wifiReconnects(0)
+    , _leakDebounce(0)
     , _wifiConnected(false)
     , _snapshotMutex(nullptr)
     , _cmdQueue(nullptr)
@@ -100,10 +101,19 @@ void ROController::update() {
     _alarms.update();
 
     // ------------------------------------------------------------------
-    // 1. LEAK CHECK
+    // 1. LEAK CHECK — debounced to filter power-on transients.
+    //    The pin must read LOW for LEAK_DEBOUNCE_TICKS consecutive ticks
+    //    (~100 ms at 50 Hz) before EMERGENCY is declared.  A real leak
+    //    is sustained; a PCB power-on transient typically clears in <50 ms.
+    //    s_leakIrqFired is used only to log that an edge was seen; the
+    //    actual trigger is always based on the current digitalRead state.
     // ------------------------------------------------------------------
-    if (s_leakIrqFired || digitalRead(Config::PIN_LEAK_SENSOR) == LOW) {
-        if (!_leakDetected) {
+    static constexpr uint8_t LEAK_DEBOUNCE_TICKS = 5;  // 5 × 20 ms = 100 ms
+
+    if (digitalRead(Config::PIN_LEAK_SENSOR) == LOW) {
+        if (s_leakIrqFired && _leakDebounce == 0)
+            Serial.println("[ROC] Leak edge detected — debouncing...");
+        if (++_leakDebounce >= LEAK_DEBOUNCE_TICKS && !_leakDetected) {
             _leakDetected = true;
             _state = SystemState::EMERGENCY;
             digitalWrite(Config::PIN_PUMP,        LOW);
@@ -111,6 +121,11 @@ void ROController::update() {
             digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
             Serial.println("[ROC] LEAK DETECTED — emergency shutdown");
         }
+    } else {
+        if (_leakDebounce > 0)
+            Serial.printf("[ROC] Leak transient cleared after %u ticks\n", _leakDebounce);
+        _leakDebounce  = 0;
+        s_leakIrqFired = false;  // pin is HIGH — discard any latched ISR edge
     }
 
     if (_state == SystemState::EMERGENCY) {

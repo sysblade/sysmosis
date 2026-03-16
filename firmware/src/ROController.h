@@ -117,6 +117,7 @@ private:
     // Counters
     uint32_t _flushCycles;
     uint32_t _wifiReconnects;
+    uint8_t  _leakDebounce;   // consecutive LOW reads; must reach threshold before EMERGENCY
 
     // WiFi (written by network task, read by control task for display only)
     bool _wifiConnected;

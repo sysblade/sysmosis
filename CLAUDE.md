@@ -23,7 +23,12 @@ mpremote connect /dev/ttyUSB0 cp main.py :main.py
 mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
 
 # Install MicroPython libraries on the device
+# lcd_api.py must be installed first — it is a required dependency of esp8266_i2c_lcd.py
+mpremote connect /dev/ttyUSB0 mip install github:dhylands/python_lcd/lcd/lcd_api.py
 mpremote connect /dev/ttyUSB0 mip install github:dhylands/python_lcd/lcd/esp8266_i2c_lcd.py
+
+# Upload all Python source files
+mpremote connect /dev/ttyUSB0 cp main.py :main.py + cp alarms.py :alarms.py
 ```
 
 ## Architecture
@@ -83,6 +88,7 @@ Dependencies are installed directly on the ESP32, not via pip:
 | Library | Source | Install Command |
 |---------|--------|-----------------|
 | `machine` | Built-in | (included in MicroPython firmware) |
+| `lcd_api` | [dhylands/python_lcd](https://github.com/dhylands/python_lcd) | `mpremote mip install github:dhylands/python_lcd/lcd/lcd_api.py` |
 | `esp8266_i2c_lcd` | [dhylands/python_lcd](https://github.com/dhylands/python_lcd) | `mpremote mip install github:dhylands/python_lcd/lcd/esp8266_i2c_lcd.py` |
 
 ## IDE Support
