@@ -25,15 +25,15 @@ Default GPIO assignments (configurable in `config.py`):
 
 | Component | GPIO | Description |
 |-----------|------|-------------|
-| LCD (I2C) | SCL=22, SDA=21 | 20x4 character display (I2C address 0x27) |
+| LCD (I2C) | SCL=23, SDA=21 | 20x4 character display (I2C address 0x27) |
 | Pump Relay | 12 | Booster pump control |
 | Inlet Valve | 13 | Source water inlet solenoid |
 | Flush Valve | 14 | Membrane flush solenoid |
-| Low Pressure Sensor | 25 | Source water pressure (opto-isolated, active low) |
-| High Pressure Sensor | 26 | Tank/faucet pressure (opto-isolated, active low) |
-| Leak Sensor | 27 | Water leak detection (opto-isolated, active low) |
-| Buzzer | 32 | Active buzzer for audio alerts |
-| TDS Sensor | 34 | Analog water quality measurement |
+| Low Pressure Sensor | 33 | Source water pressure (opto-isolated, active low) |
+| High Pressure Sensor | 32 | Tank/faucet pressure (opto-isolated, active low) |
+| Leak Sensor | 15 | Water leak detection (opto-isolated, active low) |
+| Buzzer | 16 | Active buzzer for audio alerts |
+| TDS Sensor | 2 | Analog water quality measurement |
 
 ## Setup
 
@@ -51,9 +51,10 @@ uv sync --extra dev
 
 ### Install MicroPython Libraries on ESP32
 
-Connect your ESP32 via USB, then install the LCD library:
+Connect your ESP32 via USB, then install the LCD libraries (`lcd_api` must be installed first as it is a dependency):
 
 ```bash
+mpremote connect /dev/ttyUSB0 mip install github:dhylands/python_lcd/lcd/lcd_api.py
 mpremote connect /dev/ttyUSB0 mip install github:dhylands/python_lcd/lcd/esp8266_i2c_lcd.py
 ```
 
@@ -294,7 +295,7 @@ Or in the REPL, press `Ctrl+D`.
 ```python
 # Example: Test TDS sensor in REPL
 from machine import Pin, ADC
-tds = ADC(Pin(34))
+tds = ADC(Pin(2))
 tds.atten(ADC.ATTN_11DB)
 print(tds.read())
 ```
