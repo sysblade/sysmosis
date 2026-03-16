@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Krosmosis</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body style="padding:10px">
+<h1>Krosmosis <span id="badge" class="badge s0">...</span><span id="ip-hdr" class="ip"></span></h1>
+<section>
+    <h2>LCD Display</h2>
+    <div id="lcd-widget"><pre id="lcd-display">
+
+
+                    </pre></div>
+</section>
+<section>
+    <h2>Sensors</h2>
+    <div class="row">
+        <span><span class="lbl">Source:</span><span id="sw">-</span></span>
+        <span><span class="lbl">Faucet:</span><span id="fo">-</span></span>
+        <span><span class="lbl">TDS:</span><span id="tds">-</span> PPM</span>
+    </div>
+    <div class="row">
+        <span><span class="lbl">LPS:</span><span id="lps">-</span></span>
+        <span><span class="lbl">HPS:</span><span id="hps">-</span></span>
+        <span><span class="lbl">Leak:</span><span id="leak">-</span></span>
+    </div>
+</section>
+<section>
+    <h2>Relays</h2>
+    <div class="row">
+        <span><span class="lbl">Pump:</span><span id="pump">-</span></span>
+        <span><span class="lbl">Inlet:</span><span id="inlet">-</span></span>
+        <span><span class="lbl">Flush valve:</span><span id="fv">-</span></span>
+    </div>
+</section>
+<section>
+    <h2>Timing</h2>
+    <div class="row">
+        <span><span class="lbl">Uptime:</span><span id="upt">-</span></span>
+        <span><span class="lbl">Production:</span><span id="prod">-</span></span>
+    </div>
+    <div class="row">
+        <span><span class="lbl">Flush cycles:</span><span id="fcyc">-</span></span>
+        <span><span class="lbl">Total prod:</span><span id="ptot">-</span></span>
+    </div>
+    <div id="flush-info" style="display:none" class="row">
+        <span><span class="lbl">Flush reason:</span><span id="freason">-</span></span>
+        <span><span class="lbl">Remaining:</span><span id="frem">-</span>s</span>
+    </div>
+</section>
+<section>
+    <h2>Controls</h2>
+    <div>
+        <button onclick="postAction('maintenance_toggle')">Toggle Maintenance (M)</button>
+        <button onclick="postAction('flush_start')">Manual Flush (F)</button>
+        <button class="btn-danger" onclick="confirmReset()">Reset System (R)</button>
+    </div>
+    <div id="maint-controls" style="display:none">
+        <hr>
+        <small style="color:#888">Maintenance relay controls</small><br>
+        <button onclick="postAction('pump_on')">Pump ON</button>
+        <button onclick="postAction('pump_off')">Pump OFF</button>
+        <button onclick="postAction('inlet_on')">Inlet ON</button>
+        <button onclick="postAction('inlet_off')">Inlet OFF</button>
+        <button onclick="postAction('flush_valve_on')">Flush ON</button>
+        <button onclick="postAction('flush_valve_off')">Flush OFF</button>
+    </div>
+</section>
+<script src="/static/app.js"></script>
+</body>
+</html>

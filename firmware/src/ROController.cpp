@@ -3,8 +3,7 @@
 #include "esp_task_wdt.h"
 
 // =============================================================================
-// ISR — runs on any core, must be in IRAM, minimal work only.
-// Uses a file-scope volatile so the ISR needs no class pointer.
+// ISR — IRAM, minimal work only.
 // =============================================================================
 static volatile bool s_leakIrqFired = false;
 
@@ -35,17 +34,23 @@ ROController::ROController()
     , _flushCycles(0)
     , _wifiReconnects(0)
     , _wifiConnected(false)
+    , _snapshotMutex(nullptr)
+    , _cmdQueue(nullptr)
 {
-    memset(_lcdLines, ' ', sizeof(_lcdLines));
+    memset(_lcdLines,    ' ', sizeof(_lcdLines));
+    memset(&_snapshot,    0,   sizeof(_snapshot));
     for (int i = 0; i < 4; i++) _lcdLines[i][20] = '\0';
     _flushReason[0] = '\0';
     _wifiIp[0]      = '\0';
 }
 
 // =============================================================================
-// begin() — hardware init, called once from setup()
+// begin()
 // =============================================================================
 void ROController::begin() {
+    _snapshotMutex = xSemaphoreCreateMutex();
+    _cmdQueue      = xQueueCreate(8, sizeof(ControlCmd));
+
     _initHardware();
     _initWdt();
 
@@ -59,55 +64,46 @@ void ROController::begin() {
 }
 
 void ROController::_initHardware() {
-    // Relay outputs — safe default: all off
     pinMode(Config::PIN_PUMP,        OUTPUT); digitalWrite(Config::PIN_PUMP,        LOW);
     pinMode(Config::PIN_INLET_VALVE, OUTPUT); digitalWrite(Config::PIN_INLET_VALVE, LOW);
     pinMode(Config::PIN_FLUSH_VALVE, OUTPUT); digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
 
-    // Opto-isolated sensor inputs — sensors pull the line LOW when active
     pinMode(Config::PIN_LOW_PRESSURE,  INPUT_PULLUP);
     pinMode(Config::PIN_HIGH_PRESSURE, INPUT_PULLUP);
     pinMode(Config::PIN_LEAK_SENSOR,   INPUT_PULLUP);
 
-    // ADC — 11dB attenuation gives 0-3.3V range on ESP32
     analogSetAttenuation(ADC_11db);
 
-    // I2C + LCD
     Wire.begin(Config::PIN_LCD_SDA, Config::PIN_LCD_SCL);
     _lcd.init();
     _lcd.backlight();
 
-    // Alarm subsystem (Phase 2 will activate buzzer/LED)
     _alarms.begin();
 
-    // Leak sensor ISR — latching, FALLING edge (sensor pulls LOW on leak)
     attachInterrupt(digitalPinToInterrupt(Config::PIN_LEAK_SENSOR), leakISR, FALLING);
-
     Serial.println("[ROC] Hardware initialized");
 }
 
 void ROController::_initWdt() {
-    esp_task_wdt_init(Config::WATCHDOG_TIMEOUT_S, /*panic=*/true);
-    esp_task_wdt_add(NULL);  // subscribe current task
+    esp_task_wdt_init(Config::WATCHDOG_TIMEOUT_S, true);
+    esp_task_wdt_add(NULL);
     Serial.printf("[ROC] WDT set to %us\n", Config::WATCHDOG_TIMEOUT_S);
 }
 
 // =============================================================================
-// update() — full state machine tick, called every loop()
+// update() — state machine tick
 // =============================================================================
 void ROController::update() {
     esp_task_wdt_reset();
     _alarms.update();
 
     // ------------------------------------------------------------------
-    // 1. LEAK CHECK — latching, highest priority
-    //    ISR sets s_leakIrqFired; polling is the backup.
+    // 1. LEAK CHECK
     // ------------------------------------------------------------------
     if (s_leakIrqFired || digitalRead(Config::PIN_LEAK_SENSOR) == LOW) {
         if (!_leakDetected) {
             _leakDetected = true;
             _state = SystemState::EMERGENCY;
-            // Immediately cut all flow
             digitalWrite(Config::PIN_PUMP,        LOW);
             digitalWrite(Config::PIN_INLET_VALVE, LOW);
             digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
@@ -116,47 +112,52 @@ void ROController::update() {
     }
 
     if (_state == SystemState::EMERGENCY) {
+        // Drain queue — discard all pending commands
+        ControlCmd discard;
+        while (xQueueReceive(_cmdQueue, &discard, 0) == pdTRUE) {}
+
         _alarms.triggerAlarm(AlarmId::LEAK);
-        _updateDisplay(
-            "!! LEAK DETECTED !!",
-            "ALL FLOW STOPPED",
-            "Check system and",
-            "power-cycle to reset"
-        );
-        return;  // nothing else runs until power-cycle
+        _updateDisplay("!! LEAK DETECTED !!",
+                       "ALL FLOW STOPPED",
+                       "Check system and",
+                       "power-cycle to reset");
+        _updateSnapshot();
+        return;
     }
 
     // ------------------------------------------------------------------
-    // 2. TIMING
+    // 2. PROCESS PENDING WEB COMMANDS
+    // ------------------------------------------------------------------
+    ControlCmd cmd;
+    while (xQueueReceive(_cmdQueue, &cmd, 0) == pdTRUE) {
+        _processCommand(cmd);
+    }
+
+    // ------------------------------------------------------------------
+    // 3. TIMING
     // ------------------------------------------------------------------
     uint32_t now   = millis();
     uint32_t delta = now - _lastLoopTime;
     _lastLoopTime  = now;
 
     // ------------------------------------------------------------------
-    // 3. SENSOR READS
+    // 4. SENSOR READS
     // ------------------------------------------------------------------
-    _sourceWater = (digitalRead(Config::PIN_LOW_PRESSURE)  == LOW);  // LOW = pressure present
-    _faucetOpen  = (digitalRead(Config::PIN_HIGH_PRESSURE) == LOW);  // LOW = faucet drawing water
+    _sourceWater = (digitalRead(Config::PIN_LOW_PRESSURE)  == LOW);
+    _faucetOpen  = (digitalRead(Config::PIN_HIGH_PRESSURE) == LOW);
     _currentTds  = _readTds();
 
     // ------------------------------------------------------------------
-    // 4. PRESSURE / TDS ALARMS
+    // 5. PRESSURE / TDS ALARMS
     // ------------------------------------------------------------------
-    if (!_sourceWater) {
-        _alarms.triggerAlarm(AlarmId::LOW_PRESSURE);
-    } else {
-        _alarms.clearAlarm(AlarmId::LOW_PRESSURE);
-    }
+    if (!_sourceWater) _alarms.triggerAlarm(AlarmId::LOW_PRESSURE);
+    else               _alarms.clearAlarm(AlarmId::LOW_PRESSURE);
 
-    if (_currentTds > Config::TDS_THRESHOLD) {
-        _alarms.triggerAlarm(AlarmId::TDS_HIGH);
-    } else {
-        _alarms.clearAlarm(AlarmId::TDS_HIGH);
-    }
+    if (_currentTds > Config::TDS_THRESHOLD) _alarms.triggerAlarm(AlarmId::TDS_HIGH);
+    else                                      _alarms.clearAlarm(AlarmId::TDS_HIGH);
 
     // ------------------------------------------------------------------
-    // 5. MAINTENANCE MODE — bypass all automation
+    // 6. MAINTENANCE MODE
     // ------------------------------------------------------------------
     if (_state == SystemState::MAINTENANCE) {
         char l2[21], l3[21];
@@ -165,97 +166,92 @@ void ROController::update() {
             digitalRead(Config::PIN_INLET_VALVE) ? "ON " : "OFF",
             digitalRead(Config::PIN_FLUSH_VALVE) ? "ON " : "OFF");
         snprintf(l3, sizeof(l3), "TDS: %d PPM", _currentTds);
-        _updateDisplay(
-            "STATUS: MAINTENANCE",
-            l2, l3,
-            _wifiConnected ? "WiFi: ON" : "WiFi: OFF"
-        );
+        _updateDisplay("STATUS: MAINTENANCE", l2, l3,
+                       _wifiConnected ? "WiFi: ON" : "WiFi: OFF");
+        _updateSnapshot();
         return;
     }
 
     // ------------------------------------------------------------------
-    // 6. FLUSH LOGIC
+    // 7. FLUSH LOGIC
     // ------------------------------------------------------------------
 
-    // 6a. Startup flush — deferred until source water is available
+    // 7a. Startup flush
     if (!_startupFlushDone && _sourceWater) {
         _startupFlushDone = true;
         _startFlush("Startup", Config::FLUSH_STARTUP_DURATION_MS);
+        _updateSnapshot();
         return;
     }
 
-    // 6b. Active flush — update display, check completion
+    // 7b. Active flush
     if (_state == SystemState::FLUSHING) {
-        uint32_t elapsed   = now - _flushStartTime;
-        uint32_t remaining = (elapsed < _flushDuration) ? (_flushDuration - elapsed) : 0;
-        char l3[21];
+        uint32_t remaining = _flushRemainMs();
+        char l2[21], l3[21];
+        snprintf(l2, sizeof(l2), "Reason: %.13s", _flushReason);
         snprintf(l3, sizeof(l3), "Rem:%3us Tot:%3us",
                  remaining / 1000, _flushDuration / 1000);
-        char l2[21];
-        snprintf(l2, sizeof(l2), "Reason: %.13s", _flushReason);
         _updateDisplay("STATUS: FLUSHING", l2, l3,
                        _wifiConnected ? "WiFi: ON" : "WiFi: OFF");
-        if (remaining == 0) {
-            _stopFlush();
-        }
+        if (remaining == 0) _stopFlush();
+        _updateSnapshot();
         return;
     }
 
-    // 6c. Inactivity flush — triggered from standby when source water present
+    // 7c. Inactivity flush
     if (_state == SystemState::STANDBY && _sourceWater) {
-        uint32_t standbyMs = now - _lastStandbyStart;
-        if (standbyMs >= _nextInactivityFlushMs) {
+        if ((now - _lastStandbyStart) >= _nextInactivityFlushMs) {
             _startFlush("Inactivity", Config::FLUSH_INACTIVITY_DURATION_MS);
+            _updateSnapshot();
             return;
         }
     }
 
-    // 6d. Production-interval flush (optional, disabled when interval = 0)
+    // 7d. Production-interval flush
     if (Config::FLUSH_PRODUCTION_INTERVAL_MS > 0
             && _state == SystemState::STANDBY
             && _sourceWater
             && (now - _lastFlushTime) >= Config::FLUSH_PRODUCTION_INTERVAL_MS) {
         _startFlush("Production", Config::FLUSH_PRODUCTION_DURATION_MS);
+        _updateSnapshot();
         return;
     }
 
     // ------------------------------------------------------------------
-    // 7. PRODUCTION LOGIC
+    // 8. PRODUCTION LOGIC
     // ------------------------------------------------------------------
     if (_sourceWater && _faucetOpen) {
         if (_state != SystemState::RUNNING) {
             Serial.println("[ROC] Starting production");
             _updateDisplay("STATUS: STARTING", "Opening Inlet...", "", "");
             digitalWrite(Config::PIN_INLET_VALVE, HIGH);
-            delay(1000);  // allow inlet valve to open before starting pump
+            delay(1000);
             digitalWrite(Config::PIN_PUMP, HIGH);
             _state = SystemState::RUNNING;
         }
         _productionTime += delta;
-
     } else {
         if (_state == SystemState::RUNNING) {
             Serial.println("[ROC] Stopping production");
             digitalWrite(Config::PIN_PUMP, LOW);
-            delay(1000);  // let pressure equalise before closing valve
+            delay(1000);
             digitalWrite(Config::PIN_INLET_VALVE, LOW);
-            _productionTotal += _productionTime;
-            _productionTime   = 0;
-            _state            = SystemState::STANDBY;
-            _lastStandbyStart = millis();
+            _productionTotal    += _productionTime;
+            _productionTime      = 0;
+            _state               = SystemState::STANDBY;
+            _lastStandbyStart    = millis();
         }
     }
 
     // ------------------------------------------------------------------
-    // 8. DISPLAY REFRESH
+    // 9. DISPLAY REFRESH
     // ------------------------------------------------------------------
     if (_state == SystemState::RUNNING) {
         uint32_t secs = _productionTime / 1000;
-        char l3[21];
+        char l2[21], l3[21];
+        snprintf(l2, sizeof(l2), "TDS: %d PPM", _currentTds);
         snprintf(l3, sizeof(l3), "Time: %um %02us",
                  (unsigned)(secs / 60), (unsigned)(secs % 60));
-        char l2[21];
-        snprintf(l2, sizeof(l2), "TDS: %d PPM", _currentTds);
         _updateDisplay("STATUS: RUNNING", l2, l3,
                        _wifiConnected ? "WiFi: ON" : "WiFi: OFF");
     } else {
@@ -264,14 +260,139 @@ void ROController::update() {
         _updateDisplay("STATUS: STANDBY", "System Ready",
                        "Waiting for Faucet", l4);
     }
+
+    _updateSnapshot();
+}
+
+// =============================================================================
+// Snapshot helpers
+// =============================================================================
+void ROController::_updateSnapshot() {
+    if (xSemaphoreTake(_snapshotMutex, pdMS_TO_TICKS(5)) != pdTRUE) return;
+
+    _snapshot.state           = _state;
+    _snapshot.sourceWater     = _sourceWater;
+    _snapshot.faucetOpen      = _faucetOpen;
+    _snapshot.tdsPpm          = _currentTds;
+    _snapshot.wifiConnected   = _wifiConnected;
+    strlcpy(_snapshot.wifiIp, _wifiIp, sizeof(_snapshot.wifiIp));
+    _snapshot.uptimeS         = (millis() - _startTime) / 1000;
+    _snapshot.productionS     = _productionTime / 1000;
+    strlcpy(_snapshot.flushReason, _flushReason, sizeof(_snapshot.flushReason));
+    _snapshot.flushRemainingS = _flushRemainMs() / 1000;
+    _snapshot.flushDurationS  = _flushDuration / 1000;
+    _snapshot.pump            = digitalRead(Config::PIN_PUMP);
+    _snapshot.inletValve      = digitalRead(Config::PIN_INLET_VALVE);
+    _snapshot.flushValve      = digitalRead(Config::PIN_FLUSH_VALVE);
+    _snapshot.lps             = digitalRead(Config::PIN_LOW_PRESSURE);
+    _snapshot.hps             = digitalRead(Config::PIN_HIGH_PRESSURE);
+    _snapshot.leakDetected    = _leakDetected;
+    _snapshot.flushCyclesTotal = _flushCycles;
+    _snapshot.productionTotalS = (_productionTotal + _productionTime) / 1000;
+    _snapshot.wifiReconnects  = _wifiReconnects;
+    for (int i = 0; i < 4; i++) {
+        strlcpy(_snapshot.lcdLines[i], _lcdLines[i], sizeof(_snapshot.lcdLines[i]));
+    }
+
+    xSemaphoreGive(_snapshotMutex);
+}
+
+StatusSnapshot ROController::getStatusSnapshot() {
+    StatusSnapshot snap{};
+    if (xSemaphoreTake(_snapshotMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        snap = _snapshot;
+        xSemaphoreGive(_snapshotMutex);
+    }
+    return snap;
+}
+
+// =============================================================================
+// Command queue
+// =============================================================================
+bool ROController::postCommand(const ControlCmd& cmd) {
+    return xQueueSend(_cmdQueue, &cmd, 0) == pdTRUE;
+}
+
+void ROController::_processCommand(const ControlCmd& cmd) {
+    switch (cmd.type) {
+        case ControlCmd::Type::MAINTENANCE_TOGGLE:
+            if (_state == SystemState::MAINTENANCE) _exitMaintenance();
+            else                                    _enterMaintenance();
+            break;
+
+        case ControlCmd::Type::MANUAL_FLUSH:
+            if (_state == SystemState::STANDBY) {
+                _startFlush("Manual", Config::FLUSH_MANUAL_DURATION_MS);
+            }
+            break;
+
+        case ControlCmd::Type::RELAY:
+            if (_state == SystemState::MAINTENANCE) {
+                if      (strcmp(cmd.action, "pump_on")         == 0) digitalWrite(Config::PIN_PUMP,        HIGH);
+                else if (strcmp(cmd.action, "pump_off")        == 0) digitalWrite(Config::PIN_PUMP,        LOW);
+                else if (strcmp(cmd.action, "inlet_on")        == 0) digitalWrite(Config::PIN_INLET_VALVE, HIGH);
+                else if (strcmp(cmd.action, "inlet_off")       == 0) digitalWrite(Config::PIN_INLET_VALVE, LOW);
+                else if (strcmp(cmd.action, "flush_valve_on")  == 0) digitalWrite(Config::PIN_FLUSH_VALVE, HIGH);
+                else if (strcmp(cmd.action, "flush_valve_off") == 0) digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
+            }
+            break;
+
+        case ControlCmd::Type::RESET:
+            esp_restart();
+            break;
+    }
+}
+
+// =============================================================================
+// Validation helpers (static — safe to call from network task)
+// =============================================================================
+bool ROController::validateMaintenanceToggle(const StatusSnapshot& s,
+                                              char* err, size_t n) {
+    if (s.state == SystemState::EMERGENCY) {
+        strlcpy(err, "Cannot toggle maintenance during emergency", n);
+        return false;
+    }
+    return true;
+}
+
+bool ROController::validateManualFlush(const StatusSnapshot& s,
+                                        char* err, size_t n) {
+    if (s.state != SystemState::STANDBY) {
+        strlcpy(err, "Flush only allowed from STANDBY state", n);
+        return false;
+    }
+    return true;
+}
+
+bool ROController::validateRelay(const StatusSnapshot& s, const char* action,
+                                  char* err, size_t n) {
+    if (s.state != SystemState::MAINTENANCE) {
+        strlcpy(err, "Relay control only in MAINTENANCE mode", n);
+        return false;
+    }
+    static const char* valid[] = {
+        "pump_on", "pump_off", "inlet_on", "inlet_off",
+        "flush_valve_on", "flush_valve_off"
+    };
+    for (auto a : valid) {
+        if (strcmp(action, a) == 0) return true;
+    }
+    snprintf(err, n, "Unknown relay action: %s", action);
+    return false;
 }
 
 // =============================================================================
 // Hardware helpers
 // =============================================================================
 int ROController::_readTds() const {
-    int raw = analogRead(Config::PIN_TDS_SENSOR);
-    return (int)(raw * Config::TDS_FACTOR + Config::TDS_OFFSET);
+    return (int)(analogRead(Config::PIN_TDS_SENSOR) * Config::TDS_FACTOR
+                 + Config::TDS_OFFSET);
+}
+
+uint32_t ROController::_flushRemainMs() const {
+    if (_state != SystemState::FLUSHING) return 0;
+    uint32_t elapsed = millis() - _flushStartTime;
+    return (elapsed < _flushDuration) ? (_flushDuration - elapsed) : 0;
 }
 
 void ROController::_updateDisplay(const char* l1, const char* l2,
@@ -298,10 +419,9 @@ void ROController::_startFlush(const char* reason, uint32_t durationMs) {
     Serial.printf("[ROC] Flush start: %s (%us)\n", reason, durationMs / 1000);
     digitalWrite(Config::PIN_PUMP,        LOW);
     digitalWrite(Config::PIN_INLET_VALVE, LOW);
-    delay(500);  // let system depressurise before opening flush valve
+    delay(500);
     digitalWrite(Config::PIN_FLUSH_VALVE, HIGH);
     digitalWrite(Config::PIN_PUMP,        HIGH);
-
     strlcpy(_flushReason, reason, sizeof(_flushReason));
     _flushStartTime = millis();
     _flushDuration  = durationMs;
@@ -344,60 +464,10 @@ void ROController::_exitMaintenance() {
 }
 
 // =============================================================================
-// Status accessors
+// Called by network task
 // =============================================================================
-uint32_t ROController::getFlushRemainMs() const {
-    if (_state != SystemState::FLUSHING) return 0;
-    uint32_t elapsed = millis() - _flushStartTime;
-    return (elapsed < _flushDuration) ? (_flushDuration - elapsed) : 0;
-}
-
 void ROController::setWifiConnected(bool connected, const char* ip) {
     _wifiConnected = connected;
     if (ip) strlcpy(_wifiIp, ip, sizeof(_wifiIp));
     else     _wifiIp[0] = '\0';
-}
-
-// =============================================================================
-// Web control actions (called from network task — Phase 3)
-// =============================================================================
-bool ROController::doMaintenanceToggle(char* errOut, size_t errLen) {
-    if (_state == SystemState::EMERGENCY) {
-        strlcpy(errOut, "Cannot toggle maintenance during emergency", errLen);
-        return false;
-    }
-    if (_state == SystemState::MAINTENANCE) _exitMaintenance();
-    else                                    _enterMaintenance();
-    return true;
-}
-
-bool ROController::doManualFlush(char* errOut, size_t errLen) {
-    if (_state != SystemState::STANDBY) {
-        strlcpy(errOut, "Flush only allowed from STANDBY state", errLen);
-        return false;
-    }
-    _startFlush("Manual", Config::FLUSH_MANUAL_DURATION_MS);
-    return true;
-}
-
-bool ROController::doRelayControl(const char* action, char* errOut, size_t errLen) {
-    if (_state != SystemState::MAINTENANCE) {
-        strlcpy(errOut, "Relay control only in MAINTENANCE mode", errLen);
-        return false;
-    }
-    if      (strcmp(action, "pump_on")        == 0) digitalWrite(Config::PIN_PUMP,        HIGH);
-    else if (strcmp(action, "pump_off")       == 0) digitalWrite(Config::PIN_PUMP,        LOW);
-    else if (strcmp(action, "inlet_on")       == 0) digitalWrite(Config::PIN_INLET_VALVE, HIGH);
-    else if (strcmp(action, "inlet_off")      == 0) digitalWrite(Config::PIN_INLET_VALVE, LOW);
-    else if (strcmp(action, "flush_valve_on") == 0) digitalWrite(Config::PIN_FLUSH_VALVE, HIGH);
-    else if (strcmp(action, "flush_valve_off")== 0) digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
-    else {
-        snprintf(errOut, errLen, "Unknown action: %s", action);
-        return false;
-    }
-    return true;
-}
-
-void ROController::doReset() {
-    esp_restart();
 }
