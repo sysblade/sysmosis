@@ -141,6 +141,9 @@ private:
     void _exitMaintenance();
     void _scheduleNextInactivityFlush();
 
+    void _loadCounters();   // read production_total + flush_cycles from NVS
+    void _saveCounters();   // persist them back to NVS
+
     void _updateSnapshot();
     void _processCommand(const ControlCmd& cmd);
 };

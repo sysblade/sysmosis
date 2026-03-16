@@ -1,6 +1,7 @@
 #include "ROController.h"
 #include "config.h"
 #include "esp_task_wdt.h"
+#include <Preferences.h>
 
 // =============================================================================
 // ISR — IRAM, minimal work only.
@@ -53,6 +54,7 @@ void ROController::begin() {
 
     _initHardware();
     _initWdt();
+    _loadCounters();
 
     _startTime        = millis();
     _lastLoopTime     = millis();
@@ -153,8 +155,9 @@ void ROController::update() {
     if (!_sourceWater) _alarms.triggerAlarm(AlarmId::LOW_PRESSURE);
     else               _alarms.clearAlarm(AlarmId::LOW_PRESSURE);
 
-    if (_currentTds > Config::TDS_THRESHOLD) _alarms.triggerAlarm(AlarmId::TDS_HIGH);
-    else                                      _alarms.clearAlarm(AlarmId::TDS_HIGH);
+    if      (_currentTds > Config::TDS_THRESHOLD)       _alarms.triggerAlarm(AlarmId::TDS_HIGH);
+    else if (_currentTds < Config::TDS_THRESHOLD_CLEAR) _alarms.clearAlarm(AlarmId::TDS_HIGH);
+    // else: within the dead band — hold current alarm state
 
     // ------------------------------------------------------------------
     // 6. MAINTENANCE MODE
@@ -240,6 +243,7 @@ void ROController::update() {
             _productionTime      = 0;
             _state               = SystemState::STANDBY;
             _lastStandbyStart    = millis();
+            _saveCounters();
         }
     }
 
@@ -391,7 +395,11 @@ bool ROController::validateRelay(const StatusSnapshot& s, const char* action,
 // Hardware helpers
 // =============================================================================
 int ROController::_readTds() const {
-    return (int)(analogRead(Config::PIN_TDS_SENSOR) * Config::TDS_FACTOR
+    int32_t sum = 0;
+    for (int i = 0; i < Config::TDS_SAMPLES; i++) {
+        sum += analogRead(Config::PIN_TDS_SENSOR);
+    }
+    return (int)((sum / Config::TDS_SAMPLES) * Config::TDS_FACTOR
                  + Config::TDS_OFFSET);
 }
 
@@ -409,6 +417,27 @@ void ROController::_updateDisplay(const char* l1, const char* l2,
         _lcd.setCursor(0, i);
         _lcd.print(_lcdLines[i]);
     }
+}
+
+// =============================================================================
+// NVS persistence
+// =============================================================================
+void ROController::_loadCounters() {
+    Preferences prefs;
+    prefs.begin("krosmosis", /*readOnly=*/true);
+    _productionTotal = prefs.getULong("prod_ms",  0);
+    _flushCycles     = prefs.getULong("flush_n",  0);
+    prefs.end();
+    Serial.printf("[ROC] Loaded counters — prod: %ums  flushes: %u\n",
+                  _productionTotal, _flushCycles);
+}
+
+void ROController::_saveCounters() {
+    Preferences prefs;
+    prefs.begin("krosmosis", /*readOnly=*/false);
+    prefs.putULong("prod_ms", _productionTotal);
+    prefs.putULong("flush_n", _flushCycles);
+    prefs.end();
 }
 
 // =============================================================================
@@ -443,6 +472,7 @@ void ROController::_stopFlush() {
     _state            = SystemState::STANDBY;
     _lastStandbyStart = millis();
     _scheduleNextInactivityFlush();
+    _saveCounters();
 }
 
 // =============================================================================
@@ -455,6 +485,7 @@ void ROController::_enterMaintenance() {
         digitalWrite(Config::PIN_INLET_VALVE, LOW);
         _productionTotal += _productionTime;
         _productionTime   = 0;
+        _saveCounters();
     } else if (_state == SystemState::FLUSHING) {
         digitalWrite(Config::PIN_PUMP,        LOW);
         digitalWrite(Config::PIN_FLUSH_VALVE, LOW);

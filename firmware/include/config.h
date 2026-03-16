@@ -43,7 +43,9 @@ namespace Config {
     // -------------------------------------------------------------------------
     constexpr float    TDS_FACTOR    = 0.5f;
     constexpr float    TDS_OFFSET    = 0.0f;
-    constexpr int      TDS_THRESHOLD = 100;      // PPM — above this triggers TDS_HIGH alarm
+    constexpr int      TDS_THRESHOLD       = 100;  // PPM — above this triggers TDS_HIGH alarm
+    constexpr int      TDS_THRESHOLD_CLEAR =  90;  // PPM — below this clears TDS_HIGH alarm
+    constexpr int      TDS_SAMPLES         =  16;  // ADC samples averaged per reading
 
     // -------------------------------------------------------------------------
     // Flush timing (all values in milliseconds)

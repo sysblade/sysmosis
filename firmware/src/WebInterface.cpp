@@ -9,6 +9,7 @@ WebInterface::WebInterface(ROController& ctrl)
     , _server(Config::WEB_PORT)
     , _metricsServer(Config::METRICS_PORT)
     , _authEnabled(strlen(Config::WEB_AUTH_PASSWORD) > 0)
+    , _serversStarted(false)
     , _lastReconnectCheck(0)
 {
     _sessionToken[0] = '\0';
@@ -24,28 +25,18 @@ void WebInterface::begin() {
         Serial.println("[Net] LittleFS mounted");
     }
 
-    if (strlen(Config::WIFI_SSID) > 0) {
-        _connectWifi();
-    } else {
+    if (strlen(Config::WIFI_SSID) == 0) {
         Serial.println("[Net] No WIFI_SSID configured — network disabled");
         return;
     }
 
-    if (WiFi.status() != WL_CONNECTED) {
-        Serial.println("[Net] WiFi not connected — web server not started");
-        return;
-    }
+    _connectWifi();
 
-    if (Config::WEB_ENABLED) {
-        _setupRoutes();
-    }
-
-    if (Config::METRICS_ENABLED) {
-        _setupMetricsRoutes();
-    }
-
-    if (Config::OTA_ENABLED) {
-        _setupOta();
+    if (WiFi.status() == WL_CONNECTED) {
+        _startServers();
+    } else {
+        // Servers will be started by loop() on the first successful reconnect
+        Serial.println("[Net] Initial WiFi connect failed — will retry");
     }
 }
 
@@ -55,8 +46,8 @@ void WebInterface::begin() {
 void WebInterface::loop() {
     if (strlen(Config::WIFI_SSID) == 0) return;
 
-    // OTA must be polled every loop iteration — blocks during an active upload
-    if (Config::OTA_ENABLED) {
+    // OTA must be polled every iteration — blocks during an active upload
+    if (Config::OTA_ENABLED && _serversStarted) {
         ArduinoOTA.handle();
     }
 
@@ -69,6 +60,12 @@ void WebInterface::loop() {
         _ctrl.incWifiReconnects();
         _ctrl.setWifiConnected(false, "");
         _connectWifi();
+
+        // Start servers on the first ever successful connect (initial attempt
+        // may have timed out — this is the recovery path)
+        if (!_serversStarted && WiFi.status() == WL_CONNECTED) {
+            _startServers();
+        }
     }
 }
 
@@ -91,6 +88,16 @@ void WebInterface::_connectWifi() {
     String ip = WiFi.localIP().toString();
     Serial.printf("[Net] WiFi connected — IP %s\n", ip.c_str());
     _ctrl.setWifiConnected(true, ip.c_str());
+}
+
+// =============================================================================
+// Server startup (called once after first successful WiFi connect)
+// =============================================================================
+void WebInterface::_startServers() {
+    if (Config::WEB_ENABLED)     _setupRoutes();
+    if (Config::METRICS_ENABLED) _setupMetricsRoutes();
+    if (Config::OTA_ENABLED)     _setupOta();
+    _serversStarted = true;
 }
 
 // =============================================================================

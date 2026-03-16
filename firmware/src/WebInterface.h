@@ -40,9 +40,11 @@ private:
 
     char     _sessionToken[33];   // 32 hex chars + NUL, empty = no session
     bool     _authEnabled;
+    bool     _serversStarted;     // true once routes/OTA have been registered
     uint32_t _lastReconnectCheck;
 
     void _connectWifi();
+    void _startServers();         // idempotent — call after every successful connect
     void _setupRoutes();
     void _setupMetricsRoutes();
     void _setupOta();
