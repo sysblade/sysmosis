@@ -290,6 +290,12 @@ void ROController::_updateSnapshot() {
     _snapshot.flushCyclesTotal = _flushCycles;
     _snapshot.productionTotalS = (_productionTotal + _productionTime) / 1000;
     _snapshot.wifiReconnects  = _wifiReconnects;
+    {
+        uint32_t standbyMs = millis() - _lastStandbyStart;
+        _snapshot.timeToFlushS = (_nextInactivityFlushMs > standbyMs)
+                                     ? (_nextInactivityFlushMs - standbyMs) / 1000
+                                     : 0;
+    }
     for (int i = 0; i < 4; i++) {
         strlcpy(_snapshot.lcdLines[i], _lcdLines[i], sizeof(_snapshot.lcdLines[i]));
     }

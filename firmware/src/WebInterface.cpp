@@ -7,6 +7,7 @@
 WebInterface::WebInterface(ROController& ctrl)
     : _ctrl(ctrl)
     , _server(Config::WEB_PORT)
+    , _metricsServer(Config::METRICS_PORT)
     , _authEnabled(strlen(Config::WEB_AUTH_PASSWORD) > 0)
     , _lastReconnectCheck(0)
 {
@@ -38,6 +39,14 @@ void WebInterface::begin() {
     if (Config::WEB_ENABLED) {
         _setupRoutes();
     }
+
+    if (Config::METRICS_ENABLED) {
+        _setupMetricsRoutes();
+    }
+
+    if (Config::OTA_ENABLED) {
+        _setupOta();
+    }
 }
 
 // =============================================================================
@@ -45,6 +54,11 @@ void WebInterface::begin() {
 // =============================================================================
 void WebInterface::loop() {
     if (strlen(Config::WIFI_SSID) == 0) return;
+
+    // OTA must be polled every loop iteration — blocks during an active upload
+    if (Config::OTA_ENABLED) {
+        ArduinoOTA.handle();
+    }
 
     uint32_t now = millis();
     if (now - _lastReconnectCheck < Config::WIFI_RECONNECT_INTERVAL_MS) return;
@@ -206,6 +220,7 @@ void WebInterface::_handleStatus(AsyncWebServerRequest* req) {
     doc["leak_detected"]      = s.leakDetected;
     doc["flush_cycles_total"] = s.flushCyclesTotal;
     doc["production_total_s"] = s.productionTotalS;
+    doc["time_to_flush_s"]    = s.timeToFlushS;
     doc["ip"]                 = s.wifiIp;
 
     JsonArray lcd = doc["lcd"].to<JsonArray>();
@@ -265,4 +280,158 @@ void WebInterface::_handleControl(AsyncWebServerRequest* req) {
     }
 
     _sendJson(req, 200, true, "OK");
+}
+
+// =============================================================================
+// OTA
+// =============================================================================
+void WebInterface::_setupOta() {
+    ArduinoOTA.setHostname(Config::OTA_HOSTNAME);
+
+    if (strlen(Config::OTA_PASSWORD) > 0) {
+        ArduinoOTA.setPassword(Config::OTA_PASSWORD);
+    }
+
+    // Before flashing: cut all flow immediately.
+    // We're about to reboot so the control task's relay management is moot;
+    // this ensures valves are closed even if the update only takes a few seconds.
+    ArduinoOTA.onStart([this]() {
+        const char* kind = (ArduinoOTA.getCommand() == U_FLASH)
+                               ? "firmware" : "filesystem";
+        Serial.printf("[OTA] Starting %s update\n", kind);
+
+        // Direct GPIO writes — safe from any task, no delay needed
+        digitalWrite(Config::PIN_PUMP,        LOW);
+        digitalWrite(Config::PIN_INLET_VALVE, LOW);
+        digitalWrite(Config::PIN_FLUSH_VALVE, LOW);
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("[OTA] Complete — rebooting");
+    });
+
+    ArduinoOTA.onProgress([](unsigned int done, unsigned int total) {
+        // Print only at 10% increments to avoid flooding serial
+        static unsigned int lastPct = 0;
+        unsigned int pct = (done * 100) / total;
+        if (pct / 10 != lastPct / 10) {
+            lastPct = pct;
+            Serial.printf("[OTA] %u%%\n", pct);
+        }
+    });
+
+    ArduinoOTA.onError([](ota_error_t err) {
+        const char* reason = "unknown";
+        switch (err) {
+            case OTA_AUTH_ERROR:    reason = "auth failed";      break;
+            case OTA_BEGIN_ERROR:   reason = "begin failed";     break;
+            case OTA_CONNECT_ERROR: reason = "connect failed";   break;
+            case OTA_RECEIVE_ERROR: reason = "receive failed";   break;
+            case OTA_END_ERROR:     reason = "end failed";       break;
+        }
+        Serial.printf("[OTA] Error: %s\n", reason);
+    });
+
+    ArduinoOTA.begin();
+    Serial.printf("[Net] OTA ready — hostname \"%s\"\n", Config::OTA_HOSTNAME);
+}
+
+// =============================================================================
+// Prometheus metrics
+// =============================================================================
+void WebInterface::_setupMetricsRoutes() {
+    _metricsServer.on("/metrics", HTTP_GET, [this](AsyncWebServerRequest* req) {
+        StatusSnapshot s = _ctrl.getStatusSnapshot();
+        String body = _generateMetrics(s);
+        req->send(200, "text/plain; version=0.0.4; charset=utf-8", body);
+    });
+
+    // Redirect bare "/" to /metrics for convenience
+    _metricsServer.on("/", HTTP_GET, [](AsyncWebServerRequest* req) {
+        req->redirect("/metrics");
+    });
+
+    _metricsServer.onNotFound([](AsyncWebServerRequest* req) {
+        req->send(404, "text/plain", "Not Found");
+    });
+
+    _metricsServer.begin();
+    Serial.printf("[Net] Metrics server started on port %u\n", Config::METRICS_PORT);
+}
+
+// Builds Prometheus text format — mirrors metrics.py _format_metrics() exactly.
+String WebInterface::_generateMetrics(const StatusSnapshot& s) const {
+    String out;
+    out.reserve(1400);  // avoid reallocations; typical payload ~1 KB
+
+    // Helper lambdas for the two metric shapes
+    auto gauge = [&](const char* name, const char* help, uint32_t value) {
+        out += "# HELP "; out += name; out += ' '; out += help; out += '\n';
+        out += "# TYPE "; out += name; out += " gauge\n";
+        out += name; out += ' '; out += value; out += '\n';
+    };
+    auto counter = [&](const char* name, const char* help, uint32_t value) {
+        out += "# HELP "; out += name; out += ' '; out += help; out += '\n';
+        out += "# TYPE "; out += name; out += " counter\n";
+        out += name; out += ' '; out += value; out += '\n';
+    };
+    auto labeled = [&](const char* name, const char* label,
+                        const char* lvalue, uint32_t value) {
+        out += name;
+        out += '{'; out += label; out += "=\""; out += lvalue; out += "\"} ";
+        out += value; out += '\n';
+    };
+
+    // krosmosis_info
+    out += "# HELP krosmosis_info System information\n";
+    out += "# TYPE krosmosis_info gauge\n";
+    out += "krosmosis_info{version=\"2.0\"} 1\n";
+
+    // krosmosis_uptime_seconds
+    counter("krosmosis_uptime_seconds", "System uptime in seconds", s.uptimeS);
+
+    // krosmosis_system_state (labeled)
+    out += "# HELP krosmosis_system_state Current system state\n";
+    out += "# TYPE krosmosis_system_state gauge\n";
+    labeled("krosmosis_system_state", "state", "standby",
+            s.state == SystemState::STANDBY     ? 1 : 0);
+    labeled("krosmosis_system_state", "state", "running",
+            s.state == SystemState::RUNNING     ? 1 : 0);
+    labeled("krosmosis_system_state", "state", "flushing",
+            s.state == SystemState::FLUSHING    ? 1 : 0);
+    labeled("krosmosis_system_state", "state", "emergency",
+            s.state == SystemState::EMERGENCY   ? 1 : 0);
+    labeled("krosmosis_system_state", "state", "maintenance",
+            s.state == SystemState::MAINTENANCE ? 1 : 0);
+
+    // Sensors
+    gauge("krosmosis_tds_ppm",        "Current TDS reading in PPM",  (uint32_t)s.tdsPpm);
+    gauge("krosmosis_pressure_low",   "Low pressure sensor state",   s.lps  ? 1 : 0);
+    gauge("krosmosis_pressure_high",  "High pressure sensor state",  s.hps  ? 1 : 0);
+    gauge("krosmosis_leak_detected",  "Leak sensor state",           s.leakDetected ? 1 : 0);
+
+    // Relays
+    gauge("krosmosis_pump_active",         "Pump relay state",         s.pump       ? 1 : 0);
+    gauge("krosmosis_inlet_valve_active",  "Inlet valve relay state",  s.inletValve ? 1 : 0);
+    gauge("krosmosis_flush_valve_active",  "Flush valve relay state",  s.flushValve ? 1 : 0);
+
+    // Production
+    gauge("krosmosis_production_seconds",
+          "Current cycle production time in seconds", s.productionS);
+    counter("krosmosis_production_total_seconds",
+            "Total cumulative production time in seconds", s.productionTotalS);
+
+    // Flush
+    counter("krosmosis_flush_cycles_total",
+            "Number of flush cycles completed", s.flushCyclesTotal);
+    gauge("krosmosis_time_to_flush_seconds",
+          "Seconds until next inactivity flush", s.timeToFlushS);
+
+    // WiFi
+    gauge("krosmosis_wifi_connected",
+          "WiFi connection state", s.wifiConnected ? 1 : 0);
+    counter("krosmosis_wifi_reconnects_total",
+            "Number of WiFi reconnections", s.wifiReconnects);
+
+    return out;
 }

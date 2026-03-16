@@ -21,6 +21,7 @@
 #include <ESPAsyncWebServer.h>
 #include <LittleFS.h>
 #include <ArduinoJson.h>
+#include <ArduinoOTA.h>
 
 #include "ROController.h"
 #include "config.h"
@@ -29,12 +30,13 @@ class WebInterface {
 public:
     explicit WebInterface(ROController& ctrl);
 
-    void begin();   // connect WiFi, mount LittleFS, start server — call from task
+    void begin();   // connect WiFi, mount LittleFS, start servers — call from task
     void loop();    // periodic reconnect check — call from task loop
 
 private:
     ROController&  _ctrl;
     AsyncWebServer _server;
+    AsyncWebServer _metricsServer;
 
     char     _sessionToken[33];   // 32 hex chars + NUL, empty = no session
     bool     _authEnabled;
@@ -42,13 +44,16 @@ private:
 
     void _connectWifi();
     void _setupRoutes();
+    void _setupMetricsRoutes();
+    void _setupOta();
     void _generateToken();
 
-    bool _checkAuth(AsyncWebServerRequest* req) const;
-    void _sendJson(AsyncWebServerRequest* req, int code,
-                   bool ok, const char* msg) const;
+    bool   _checkAuth(AsyncWebServerRequest* req) const;
+    void   _sendJson(AsyncWebServerRequest* req, int code,
+                     bool ok, const char* msg) const;
+    String _generateMetrics(const StatusSnapshot& s) const;
 
-    // Route handlers
+    // Web UI route handlers
     void _handleRoot(AsyncWebServerRequest* req);
     void _handleStatus(AsyncWebServerRequest* req);
     void _handleControl(AsyncWebServerRequest* req);

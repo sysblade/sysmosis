@@ -7,20 +7,27 @@ static ROController  controller;
 static WebInterface* webIface = nullptr;
 
 // =============================================================================
-// Network task — Core 0, priority 1.
-// ESPAsyncWebServer is interrupt-driven; this task only handles WiFi and
-// reconnect checks. The web server callbacks fire independently via TCP/IP ISR.
+// Network task — pinned to the core opposite the loop task.
+//
+// Intentionally NOT subscribed to the task WDT:
+//   - WiFi reconnects and OTA uploads can legitimately stall for seconds.
+//   - The control task (loop) feeds the WDT independently; a hang there
+//     still triggers a reset.
 // =============================================================================
 static void networkTask(void* /*param*/) {
     webIface->begin();
+
+    Serial.printf("[Net] Stack HWM after begin: %u words free\n",
+                  uxTaskGetStackHighWaterMark(NULL));
+
     for (;;) {
         webIface->loop();
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(10));  // 100 Hz poll keeps OTA responsive
     }
 }
 
 // =============================================================================
-// setup() — Core 1
+// setup() — runs on the loop task's core before loop() starts
 // =============================================================================
 void setup() {
     Serial.begin(115200);
@@ -28,10 +35,12 @@ void setup() {
 
     controller.begin();
 
-    // Start network task on whichever core the loop task is NOT on.
-    // ARDUINO_RUNNING_CORE defaults to 1 but is not guaranteed — derive it
-    // at runtime so the two tasks always end up on different cores.
-    const BaseType_t loopCore = xPortGetCoreID();  // core setup()/loop() runs on
+    Serial.printf("[Main] Setup stack HWM: %u words free\n",
+                  uxTaskGetStackHighWaterMark(NULL));
+
+    // Pin the network task to whichever core setup()/loop() is NOT on.
+    // ARDUINO_RUNNING_CORE defaults to 1 but is not guaranteed.
+    const BaseType_t loopCore = xPortGetCoreID();
     const BaseType_t netCore  = (loopCore == 0) ? 1 : 0;
     Serial.printf("[Main] Loop core: %d  Network core: %d\n",
                   (int)loopCore, (int)netCore);
@@ -41,9 +50,9 @@ void setup() {
         xTaskCreatePinnedToCore(
             networkTask,
             "net",
-            10240,    // stack — web + JSON needs headroom
+            10240,    // words — headroom for ArduinoOTA + ArduinoJson + TLS
             nullptr,
-            1,        // same priority as loop task
+            1,
             nullptr,
             netCore
         );
@@ -51,10 +60,10 @@ void setup() {
 }
 
 // =============================================================================
-// loop() — Core 1, driven by Arduino's loopTask.
-// WDT is fed inside controller.update() before any other work.
+// loop() — control task, Core 1 (typically).
+// WDT is fed at the top of controller.update() before any other work.
 // =============================================================================
 void loop() {
     controller.update();
-    delay(20);  // ~50 Hz
+    delay(20);  // ~50 Hz tick rate
 }

@@ -35,6 +35,7 @@ struct StatusSnapshot {
     uint32_t    flushCyclesTotal;
     uint32_t    productionTotalS;
     uint32_t    wifiReconnects;
+    uint32_t    timeToFlushS;     // seconds until next inactivity flush
     char        lcdLines[4][21];
 };
 

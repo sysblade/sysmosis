@@ -58,8 +58,19 @@ namespace Config {
 
     // -------------------------------------------------------------------------
     // Watchdog
+    // Only the control task (Core 1 / loopTask) subscribes to the WDT.
+    // The network task intentionally does NOT subscribe: WiFi reconnects and
+    // OTA flashing can legitimately stall for several seconds without meaning
+    // the system is hung. If the control task hangs, the WDT fires regardless.
     // -------------------------------------------------------------------------
     constexpr uint32_t WATCHDOG_TIMEOUT_S = 30;   // esp_task_wdt_init takes seconds
+
+    // -------------------------------------------------------------------------
+    // OTA (over-the-air firmware update via Arduino IDE / PlatformIO)
+    // -------------------------------------------------------------------------
+    constexpr bool     OTA_ENABLED    = true;
+    constexpr char     OTA_HOSTNAME[] = "krosmosis";
+    constexpr char     OTA_PASSWORD[] = "";        // empty = no password required
 
     // -------------------------------------------------------------------------
     // WiFi
