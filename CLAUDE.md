@@ -18,9 +18,19 @@ uv run ruff check .
 # Connect to ESP32 REPL
 mpremote connect /dev/ttyUSB0
 
-# Upload code to ESP32
-mpremote connect /dev/ttyUSB0 cp main.py :main.py
-mpremote connect /dev/ttyUSB0 cp metrics.py :metrics.py
+# Deploy all files to ESP32 (preferred — verifies SHA-256 CRC after each upload, retries on mismatch)
+uv run python deploy.py
+uv run python deploy.py /dev/ttyACM0  # alternate port
+
+# Run the file already stored on the device and stream output in real-time
+uv run mpremote connect /dev/ttyUSB0 exec "exec(open('main.py').read())"
+
+# Or: open REPL and press Ctrl+D (soft reset) — device re-runs main.py automatically
+uv run mpremote connect /dev/ttyUSB0 repl
+
+# AVOID: mpremote run streams the LOCAL file via raw serial — it does NOT run the stored
+# file, and it corrupts bytes on large files (>~100 lines). Never use for deployment.
+#   mpremote connect /dev/ttyUSB0 run main.py  <-- DO NOT USE
 
 # Install MicroPython libraries on the device
 # lcd_api.py must be installed first — it is a required dependency of esp8266_i2c_lcd.py

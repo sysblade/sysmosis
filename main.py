@@ -79,6 +79,7 @@ class ROController:
         self.wdt = None
         self._spinner_idx = 0
         self._last_spinner_ms = 0
+        self._spinner = [" ", chr(0b10100101)]
 
         # Hardware init
         # Use 100 kHz - many LCD I2C backpacks are unreliable at higher speeds
@@ -93,10 +94,10 @@ class ROController:
         addr = get_config("LCD_I2C_ADDR", 0x27)
         if addr in devices:
             self.lcd = I2cLcd(i2c, addr, 4, 20)
-            log("LCD", "Initialized at 0x{:02x}".format(addr))
+            log("LCD", "Initialized at 0x%02x" % addr)
         else:
             self.lcd = None
-            log("LCD", "Not found at 0x{:02x} - display disabled".format(addr))
+            log("LCD", "Not found at 0x%02x - display disabled" % addr)
         # FIXED on the PCB to relay
         self.pump    = Pin(get_config("PIN_PUMP", 12),          Pin.OUT, value=0)
         self.inlet_v = Pin(get_config("PIN_INLET_VALVE", 13),   Pin.OUT, value=0)
@@ -123,10 +124,7 @@ class ROController:
         self.leak_detected = True
         self.system_state = State.EMERGENCY
 
-    _SPINNER = [" ", chr(0b10100101)]
-
-    @staticmethod
-    def _pad(s, width=20):
+    def _pad(self, s, width=20):
         # MicroPython ESP32 doesn't support str.ljust()
         s = s[:width]
         return s + " " * (width - len(s))
@@ -135,16 +133,14 @@ class ROController:
         # Advance spinner every 500 ms - last char of line 4 as a heartbeat indicator
         now_ms = time.ticks_ms()
         if time.ticks_diff(now_ms, self._last_spinner_ms) >= 500:
-            self._spinner_idx = (self._spinner_idx + 1) % len(self._SPINNER)
+            self._spinner_idx = (self._spinner_idx + 1) % len(self._spinner)
             self._last_spinner_ms = now_ms
-        spinner = self._SPINNER[self._spinner_idx]
+        spinner = self._spinner[self._spinner_idx]
 
-        self.lcd_lines = [
-            self._pad(l1),
-            self._pad(l2),
-            self._pad(l3),
-            self._pad(l4, 19) + spinner,  # last char reserved for heartbeat
-        ]
+        self.lcd_lines[0] = self._pad(l1)
+        self.lcd_lines[1] = self._pad(l2)
+        self.lcd_lines[2] = self._pad(l3)
+        self.lcd_lines[3] = self._pad(l4, 19) + spinner
         if self.lcd:
             self.lcd.move_to(0, 0)
             self.lcd.putstr(self.lcd_lines[0])
@@ -492,7 +488,7 @@ class ROController:
                     self.update_display(
                         "STATUS: FLUSHING",
                         f"Reason: {self.flush_reason}",
-                        f"Rem:{int(remaining):3d}s Tot:{self.flush_duration:3d}s",
+                        "Rem:%3ds Tot:%3ds" % (int(remaining), self.flush_duration),
                         "WiFi: " + ("ON" if self.wifi_connected else "OFF"),
                     )
                     if remaining <= 0:

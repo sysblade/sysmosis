@@ -1,6 +1,9 @@
 from machine import Pin, PWM, Timer
 import time
 
+def _log(msg):
+    print("[{:8d}] [ALARM] {}".format(time.ticks_ms(), msg))
+
 # --- 1. Full Note Scale (1 per line) ---
 NOTE_REST = 0
 NOTE_C4   = 262
@@ -38,12 +41,12 @@ ALARMS = {
         'priority': 0
     },
     'LOW_PRESSURE': {
-        'notes': [(NOTE_G5, 150), (NOTE_E5, 150), (NOTE_C5, 150), (NOTE_G4, 300)],
+        'notes': [(NOTE_G5, 120), (NOTE_REST, 120), (NOTE_G5, 120), (NOTE_REST, 4000)],
         'blink': 500,
         'priority': 2
     },
     'TDS_HIGH': {
-        'notes': [(NOTE_A4, 70), (NOTE_AS4, 70), (NOTE_A4, 70), (NOTE_AS4, 70)],
+        'notes': [(NOTE_A4, 100), (NOTE_REST, 6000)],
         'blink': 1000,
         'priority': 3
     }
@@ -66,14 +69,17 @@ def init(buzzer_pin, led_pin=None):
     global buzzer, led
     buzzer = PWM(Pin(buzzer_pin))
     buzzer.duty(0)  # Ensure silence immediately after init
+    _log("Init buzzer on pin {}".format(buzzer_pin))
     if led_pin is not None:
         led = Pin(led_pin, Pin.OUT)
         led.value(0)
+        _log("Init LED on pin {}".format(led_pin))
 
 def trigger_alarm(name):
     """Add an alarm to the active list if not already there."""
     if name in ALARMS and name not in active_alarms:
         active_alarms.append(name)
+        _log("TRIGGERED {} | active={}".format(name, active_alarms))
         _refresh_led_logic()
 
 def clear_alarm(name):
@@ -85,6 +91,7 @@ def clear_alarm(name):
         note_index = 0
         if not active_alarms and buzzer is not None:
             buzzer.duty(0)  # Silence immediately, don't wait for next update_alarm_async
+        _log("CLEARED {} | active={}".format(name, active_alarms))
         _refresh_led_logic()
 
 def _refresh_led_logic():
