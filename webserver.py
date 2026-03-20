@@ -15,15 +15,17 @@ class WebServer:
         self.server = None
         self._get_status = None
         self._do_control = None
+        self._get_logs = None
         self._auth_password = None
         self._session_token = None
         self._https = False
         self._certfile = None
         self._keyfile = None
 
-    def register_callbacks(self, get_status, do_control):
+    def register_callbacks(self, get_status, do_control, get_logs=None):
         self._get_status = get_status
         self._do_control = do_control
+        self._get_logs = get_logs
 
     def configure_auth(self, password):
         """Enable password authentication. Call before start()."""
@@ -159,6 +161,8 @@ class WebServer:
             self._serve_file(client, STATIC_DIR + "/index.html", "text/html")
         elif method == "GET" and path == "/status":
             self._handle_status(client)
+        elif method == "GET" and path == "/logs":
+            self._handle_logs(client)
         elif method == "POST" and path == "/control":
             self._handle_control(client, body)
         elif method == "GET" and path == "/login":
@@ -207,6 +211,17 @@ class WebServer:
         else:
             self._send(client, "503 Service Unavailable", "application/json",
                        ujson.dumps({"error": "No status callback"}))
+
+    def _handle_logs(self, client):
+        if self._get_logs:
+            try:
+                logs = self._get_logs()
+                body = "\n".join(logs)
+                self._send(client, "200 OK", "text/plain", body)
+            except Exception as e:
+                self._send(client, "500 Internal Server Error", "text/plain", str(e))
+        else:
+            self._send(client, "503 Service Unavailable", "text/plain", "No logs callback")
 
     def _handle_control(self, client, body):
         action = ""

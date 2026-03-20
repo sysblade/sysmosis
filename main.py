@@ -2,6 +2,9 @@ from machine import Pin, ADC, SoftI2C, WDT, PWM, Timer
 from esp8266_i2c_lcd import I2cLcd
 import time
 import random
+import gc
+import ujson
+import os
 
 # Ensure alarms.py exists on your ESP32 root with the non-blocking logic
 from alarms import trigger_alarm, clear_alarm, update_alarm_async, ALARMS, init as init_alarms
@@ -22,10 +25,17 @@ def get_config(name, default):
 # ==========================================
 # LOGGING
 # ==========================================
+LOG_BUFFER = []
+MAX_LOG_ENTRIES = 50
+
 def log(tag, msg):
-    """Print a timestamped log line to the serial REPL."""
+    """Print a timestamped log line to the serial REPL and buffer."""
     ms = time.ticks_ms()
-    print("[{:8d}] [{}] {}".format(ms, tag, msg))
+    line = "[{:8d}] [{}] {}".format(ms, tag, msg)
+    print(line)
+    LOG_BUFFER.append(line)
+    if len(LOG_BUFFER) > MAX_LOG_ENTRIES:
+        LOG_BUFFER.pop(0)
 
 # ==========================================
 # 2. STATE
@@ -77,9 +87,12 @@ class ROController:
         self.lcd_lines = ["", "", "", ""]
         self.lcd = None
         self.wdt = None
+        self.wifi_started = False
         self._spinner_idx = 0
         self._last_spinner_ms = 0
         self._spinner = [" ", chr(0b10100101)]
+
+        self._load_stats()
 
         # Hardware init
         # Use 100 kHz - many LCD I2C backpacks are unreliable at higher speeds
@@ -113,6 +126,32 @@ class ROController:
         self.leak.irq(trigger=Pin.IRQ_FALLING, handler=self._emergency_shutdown)
         self._schedule_next_inactivity_flush()
         log("ROC", "Hardware initialized")
+
+    # ==========================================
+    # PERSISTENCE
+    # ==========================================
+    def _load_stats(self):
+        try:
+            with open("stats.json", "r") as f:
+                data = ujson.load(f)
+                self.metrics_production_total = data.get("production_total", 0)
+                self.metrics_flush_cycles = data.get("flush_cycles", 0)
+                log("ROC", "Loaded stats: prod={} flush={}".format(
+                    int(self.metrics_production_total), self.metrics_flush_cycles))
+        except OSError:
+            log("ROC", "No stats file found, starting from zero")
+        except Exception as e:
+            log("ROC", "Error loading stats: {}".format(e))
+
+    def _save_stats(self):
+        try:
+            with open("stats.json", "w") as f:
+                ujson.dump({
+                    "production_total": int(self.metrics_production_total),
+                    "flush_cycles": self.metrics_flush_cycles
+                }, f)
+        except Exception as e:
+            log("ROC", "Error saving stats: {}".format(e))
 
     # ==========================================
     # IRQ & HELPERS
@@ -187,6 +226,7 @@ class ROController:
         self.metrics_flush_cycles += 1
         self.last_standby_start = time.time()
         self._schedule_next_inactivity_flush()
+        self._save_stats()
 
     def enter_maintenance(self):
         """Stop all automated hardware and enter maintenance mode for manual control."""
@@ -197,9 +237,11 @@ class ROController:
             self.inlet_v.value(0)
             self.metrics_production_total += self.production_time
             self.production_time = 0
+            self._save_stats()
         elif self.system_state == State.FLUSHING:
             self.pump.value(0)
             self.flush_v.value(0)
+            self._save_stats()
         self.system_state = State.MAINTENANCE
 
     def exit_maintenance(self):
@@ -296,26 +338,26 @@ class ROController:
     def connect_wifi(self):
         ssid = get_config("WIFI_SSID", None)
         if not ssid:
-            log("WIFI", "No SSID configured, skipping")
+            return
+        import network
+        log("WIFI", "Starting connection to '{}'...".format(ssid))
+        wlan = network.WLAN(network.STA_IF)
+        wlan.active(True)
+        wlan.connect(ssid, get_config("WIFI_PASSWORD", ""))
+        self.wifi_connected = False
+        self.last_wifi_check = time.time()
+
+    def _init_network_services(self):
+        """Starts web and metrics servers once connected. Only called once per successful connect."""
+        if self.wifi_started:
             return
         import network
         from metrics import create_system_collector, MetricsServer
         from webserver import WebServer
-        log("WIFI", "Connecting to '{}'...".format(ssid))
         wlan = network.WLAN(network.STA_IF)
-        wlan.active(True)
-        wlan.connect(ssid, get_config("WIFI_PASSWORD", ""))
-        timeout = get_config("WIFI_TIMEOUT", 10)
-        t = time.time()
-        while not wlan.isconnected():
-            self.wdt.feed()
-            time.sleep_ms(200)
-            if time.time() - t > timeout:
-                log("WIFI", "Connection timed out")
-                return
-        self.wifi_connected = True
         self.wifi_ip = wlan.ifconfig()[0]
         log("WIFI", "Connected, IP={}".format(self.wifi_ip))
+
         if get_config("METRICS_ENABLED", True):
             self.metrics_server = MetricsServer(port=get_config("METRICS_PORT", 8080))
             collector = create_system_collector(
@@ -351,7 +393,11 @@ class ROController:
         if get_config("WEB_ENABLED", True):
             _web_port = get_config("WEB_PORT", 443 if get_config("WEB_HTTPS", False) else 80)
             self.web_server = WebServer(port=_web_port)
-            self.web_server.register_callbacks(self._get_web_status, self._do_web_control)
+            self.web_server.register_callbacks(
+                self._get_web_status,
+                self._do_web_control,
+                lambda: LOG_BUFFER
+            )
 
             _auth_pw = get_config("WEB_AUTH_PASSWORD", None)
             if _auth_pw:
@@ -366,22 +412,29 @@ class ROController:
             self.web_server.start()
             _scheme = "https" if get_config("WEB_HTTPS", False) else "http"
             log("WEB", "UI at {}://{}:{}/".format(_scheme, self.wifi_ip, _web_port))
+        self.wifi_started = True
 
     def check_wifi_reconnect(self):
         ssid = get_config("WIFI_SSID", None)
         if not ssid:
             return
         now = time.time()
-        if now - self.last_wifi_check < get_config("WIFI_RECONNECT_INTERVAL", 60):
-            return
-        self.last_wifi_check = now
         import network
         wlan = network.WLAN(network.STA_IF)
+
         if not wlan.isconnected():
             self.wifi_connected = False
-            self.metrics_wifi_reconnects += 1
-            log("WIFI", "Dropped, reconnecting (attempt {})...".format(self.metrics_wifi_reconnects))
-            self.connect_wifi()
+            self.wifi_started = False
+            if now - self.last_wifi_check >= get_config("WIFI_RECONNECT_INTERVAL", 60):
+                self.last_wifi_check = now
+                self.metrics_wifi_reconnects += 1
+                log("WIFI", "Disconnected, attempting to connect (attempt {})...".format(
+                    self.metrics_wifi_reconnects))
+                wlan.connect(ssid, get_config("WIFI_PASSWORD", ""))
+        else:
+            if not self.wifi_connected:
+                self.wifi_connected = True
+                self._init_network_services()
 
     # ==========================================
     # MAIN LOOP
@@ -398,7 +451,6 @@ class ROController:
         self._splash("RO SYSTEM v1.0", "Initializing...", "Sensors: OK", "Ready.")
         self.wdt = WDT(timeout=get_config("WATCHDOG_TIMEOUT", 30000))
         log("ROC", "WDT set to {}ms".format(get_config("WATCHDOG_TIMEOUT", 30000)))
-        self._splash("Connecting WiFi...", "Please wait...")
         self.connect_wifi()
         self.last_wifi_check = time.time()
         log("ROC", "Entering main loop")
@@ -406,149 +458,174 @@ class ROController:
         _last_sensor_log = 0
 
         while True:
-            self.wdt.feed()
-            update_alarm_async()
-            self.check_wifi_reconnect()
-            if self.metrics_server:
-                self.metrics_server.handle_request()
-            if self.web_server:
-                self.web_server.handle_request()
+            try:
+                self.wdt.feed()
+                update_alarm_async()
+                self.check_wifi_reconnect()
+                if self.metrics_server:
+                    self.metrics_server.handle_request()
+                if self.web_server:
+                    self.web_server.handle_request()
 
-            # 1. LEAK LOGIC (Critical)
-            if self.leak_detected or self.leak.value() == 0:
-                log("LEAK", "DETECTED - emergency shutdown, all outputs OFF")
-                self.update_display(
-                    "!! LEAK DETECTED !!",
-                    "ALL FLOW STOPPED",
-                    "Check system and",
-                    "power-cycle to reset",
-                )
-                trigger_alarm('LEAK')
-                while True:
-                    self.wdt.feed()
-                    update_alarm_async()
-                    time.sleep_ms(10)
-
-            # 2. SOURCE WATER LOGIC
-            if self.lps.value() == 1:  # No pressure
-                trigger_alarm('LOW_PRESSURE')
-            else:
-                clear_alarm('LOW_PRESSURE')
-
-            # 3. TDS LOGIC
-            if self.get_tds() > get_config("TDS_THRESHOLD", 100):
-                trigger_alarm('TDS_HIGH')
-            else:
-                clear_alarm('TDS_HIGH')
-
-            # 4. TIMING
-            now = time.time()
-            delta = now - self.last_loop_time
-            self.last_loop_time = now
-
-            self.source_water = (self.lps.value() == 0)
-            self.faucet_open = (self.hps.value() == 0)
-            self.current_tds = self.get_tds()
-
-            # Periodic sensor log every 10 s
-            _now_ms = time.ticks_ms()
-            if time.ticks_diff(_now_ms, _last_sensor_log) >= 10000:
-                _last_sensor_log = _now_ms
-                _s = _STATE_NAMES.get(self.system_state, "?")
-                log("SENS", "state={} src={} faucet={} tds={} lps={} hps={}".format(_s, self.source_water, self.faucet_open, self.current_tds, self.lps.value(), self.hps.value()))
-
-            # 5. MAINTENANCE MODE: bypass all automation
-            if self.system_state == State.MAINTENANCE:
-                p  = "ON " if self.pump.value()    else "OFF"
-                iv = "ON " if self.inlet_v.value() else "OFF"
-                fv = "ON " if self.flush_v.value() else "OFF"
-                self.update_display(
-                    "STATUS: MAINTENANCE",
-                    f"P:{p} IV:{iv} FV:{fv}",
-                    f"TDS: {self.current_tds} PPM",
-                    "WiFi: " + ("ON" if self.wifi_connected else "OFF"),
-                )
-                continue
-
-            # 6. FLUSH LOGIC
-
-            # 6a. Trigger startup flush (deferred until source water is available)
-            if not self.startup_flush_done and self.source_water:
-                self.startup_flush_done = True
-                self.start_flush("Startup", get_config("FLUSH_STARTUP_DURATION", 20))
-
-            # 6b. Handle active flush: update display and check for completion
-            if self.system_state == State.FLUSHING:
-                if not self.source_water:
-                    log("FLUSH", "Aborted - source pressure lost")
-                    self.stop_flush()
-                else:
-                    elapsed = now - self.flush_start_time
-                    remaining = max(0, self.flush_duration - elapsed)
+                # 1. LEAK LOGIC (Critical)
+                if self.leak_detected or self.leak.value() == 0:
+                    log("LEAK", "DETECTED - emergency shutdown, all outputs OFF")
                     self.update_display(
-                        "STATUS: FLUSHING",
-                        f"Reason: {self.flush_reason}",
-                        "Rem:%3ds Tot:%3ds" % (int(remaining), self.flush_duration),
+                        "!! LEAK DETECTED !!",
+                        "ALL FLOW STOPPED",
+                        "Check system and",
+                        "power-cycle to reset",
+                    )
+                    trigger_alarm('LEAK')
+                    while True:
+                        self.wdt.feed()
+                        update_alarm_async()
+                        time.sleep_ms(10)
+
+                # 2. SOURCE WATER LOGIC
+                if self.lps.value() == 1:  # No pressure
+                    trigger_alarm('LOW_PRESSURE')
+                else:
+                    clear_alarm('LOW_PRESSURE')
+
+                # 3. TDS LOGIC
+                if self.get_tds() > get_config("TDS_THRESHOLD", 100):
+                    trigger_alarm('TDS_HIGH')
+                else:
+                    clear_alarm('TDS_HIGH')
+
+                # 4. TIMING
+                now = time.time()
+                delta = now - self.last_loop_time
+                self.last_loop_time = now
+
+                self.source_water = (self.lps.value() == 0)
+                self.faucet_open = (self.hps.value() == 0)
+                self.current_tds = self.get_tds()
+
+                # Periodic sensor log every 10 s
+                _now_ms = time.ticks_ms()
+                if time.ticks_diff(_now_ms, _last_sensor_log) >= 10000:
+                    _last_sensor_log = _now_ms
+                    _s = _STATE_NAMES.get(self.system_state, "?")
+                    log("SENS", "state={} src={} faucet={} tds={} lps={} hps={}".format(
+                        _s, self.source_water, self.faucet_open, self.current_tds,
+                        self.lps.value(), self.hps.value()))
+
+                # 5. MAINTENANCE MODE: bypass all automation
+                if self.system_state == State.MAINTENANCE:
+                    p  = "ON " if self.pump.value()    else "OFF"
+                    iv = "ON " if self.inlet_v.value() else "OFF"
+                    fv = "ON " if self.flush_v.value() else "OFF"
+                    self.update_display(
+                        "STATUS: MAINTENANCE",
+                        f"P:{p} IV:{iv} FV:{fv}",
+                        f"TDS: {self.current_tds} PPM",
                         "WiFi: " + ("ON" if self.wifi_connected else "OFF"),
                     )
-                    if remaining <= 0:
-                        self.stop_flush()
-                continue  # Skip production logic while flushing
-
-            # 6c. Trigger inactivity flush (standby only, source water required)
-            if self.system_state == State.STANDBY and self.source_water:
-                standby_secs = now - self.last_standby_start
-                if standby_secs >= self.next_inactivity_flush_in:
-                    self.start_flush("Inactivity", get_config("FLUSH_INACTIVITY_DURATION", 60))
+                    gc.collect()
                     continue
 
-            # 6d. Trigger production-interval flush (optional, disabled when interval=0)
-            production_flush_interval = get_config("FLUSH_PRODUCTION_INTERVAL", 0)
-            if (production_flush_interval > 0
-                    and self.system_state == State.STANDBY
-                    and self.source_water
-                    and (now - self.last_flush_time) >= production_flush_interval):
-                self.start_flush("Production", get_config("FLUSH_PRODUCTION_DURATION", 30))
-                continue
+                # 6. FLUSH LOGIC
 
-            # 7. PRODUCTION LOGIC
-            if self.source_water and self.faucet_open:
-                if self.system_state != State.RUNNING:
-                    log("PROD", "Starting production")
-                    self.update_display("STATUS: STARTING", "Opening Inlet...", "", "")
-                    self.inlet_v.value(1)
-                    time.sleep(1)
-                    self.pump.value(1)
-                    self.system_state = State.RUNNING
-                self.production_time += delta
+                # 6a. Trigger startup flush (deferred until source water is available)
+                if not self.startup_flush_done and self.source_water:
+                    self.startup_flush_done = True
+                    self.start_flush("Startup", get_config("FLUSH_STARTUP_DURATION", 20))
 
-            elif not self.faucet_open or not self.source_water:
+                # 6b. Handle active flush: update display and check for completion
+                if self.system_state == State.FLUSHING:
+                    if not self.source_water:
+                        log("FLUSH", "Aborted - source pressure lost")
+                        self.stop_flush()
+                    else:
+                        elapsed = now - self.flush_start_time
+                        remaining = max(0, self.flush_duration - elapsed)
+                        self.update_display(
+                            "STATUS: FLUSHING",
+                            f"Reason: {self.flush_reason}",
+                            "Rem:%3ds Tot:%3ds" % (int(remaining), self.flush_duration),
+                            "WiFi: " + ("ON" if self.wifi_connected else "OFF"),
+                        )
+                        if remaining <= 0:
+                            self.stop_flush()
+                    gc.collect()
+                    continue  # Skip production logic while flushing
+
+                # 6c. Trigger inactivity flush (standby only, source water required)
+                if self.system_state == State.STANDBY and self.source_water:
+                    standby_secs = now - self.last_standby_start
+                    if standby_secs >= self.next_inactivity_flush_in:
+                        self.start_flush("Inactivity", get_config("FLUSH_INACTIVITY_DURATION", 60))
+                        gc.collect()
+                        continue
+
+                # 6d. Trigger production-interval flush (optional, disabled when interval=0)
+                production_flush_interval = get_config("FLUSH_PRODUCTION_INTERVAL", 0)
+                if (production_flush_interval > 0
+                        and self.system_state == State.STANDBY
+                        and self.source_water
+                        and (now - self.last_flush_time) >= production_flush_interval):
+                    self.start_flush("Production", get_config("FLUSH_PRODUCTION_DURATION", 30))
+                    gc.collect()
+                    continue
+
+                # 7. PRODUCTION LOGIC
+                if self.source_water and self.faucet_open:
+                    if self.system_state != State.RUNNING:
+                        log("PROD", "Starting production")
+                        self.update_display("STATUS: STARTING", "Opening Inlet...", "", "")
+                        self.inlet_v.value(1)
+                        time.sleep(1)
+                        self.pump.value(1)
+                        self.system_state = State.RUNNING
+                    self.production_time += delta
+
+                elif not self.faucet_open or not self.source_water:
+                    if self.system_state == State.RUNNING:
+                        log("PROD", "Stopping production (session={}s total={}s)".format(
+                            int(self.production_time),
+                            int(self.metrics_production_total + self.production_time)))
+                        self.pump.value(0)
+                        time.sleep(1)
+                        self.inlet_v.value(0)
+                        self.system_state = State.STANDBY
+                        self.metrics_production_total += self.production_time
+                        self.production_time = 0
+                        # Reset inactivity timer on production stop
+                        self.last_standby_start = time.time()
+                        self._save_stats()
+
+                # 8. DISPLAY REFRESH
                 if self.system_state == State.RUNNING:
-                    log("PROD", "Stopping production (session={}s total={}s)".format(int(self.production_time), int(self.metrics_production_total + self.production_time)))
-                    self.pump.value(0)
-                    time.sleep(1)
-                    self.inlet_v.value(0)
-                    self.system_state = State.STANDBY
-                    self.metrics_production_total += self.production_time
-                    self.production_time = 0
-                    # Reset inactivity timer on production stop
-                    self.last_standby_start = time.time()
+                    self.update_display(
+                        "STATUS: RUNNING",
+                        f"TDS: {self.current_tds} PPM",
+                        f"Time: {int(self.production_time//60)}m {int(self.production_time%60)}s",
+                        "WiFi: " + ("ON" if self.wifi_connected else "OFF")
+                    )
+                else:
+                    self.update_display(
+                        "STATUS: STANDBY",
+                        "System Ready",
+                        "Waiting for Faucet",
+                        f"Last TDS: {self.current_tds}PPM"
+                    )
 
-            # 8. DISPLAY REFRESH
-            if self.system_state == State.RUNNING:
-                self.update_display(
-                    "STATUS: RUNNING",
-                    f"TDS: {self.current_tds} PPM",
-                    f"Time: {int(self.production_time//60)}m {int(self.production_time%60)}s",
-                    "WiFi: " + ("ON" if self.wifi_connected else "OFF")
-                )
-            else:
-                self.update_display(
-                    "STATUS: STANDBY",
-                    "System Ready",
-                    "Waiting for Faucet",
-                    f"Last TDS: {self.current_tds}PPM"
-                )
+                gc.collect()
+
+            except Exception as e:
+                log("FATAL", "Loop error: {}".format(e))
+                # Try to ensure relays are off on unexpected error
+                try:
+                    self.pump.value(0)
+                    self.inlet_v.value(0)
+                    self.flush_v.value(0)
+                except:
+                    pass
+                time.sleep(5)  # Wait before retry/reset
+                import machine
+                machine.reset()
 
 
 try:
