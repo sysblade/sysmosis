@@ -1,6 +1,6 @@
 # TODO
 
-Future improvements for the Krosmosis RO controller.
+Future improvements for the Sysmosis RO controller.
 
 ## Web Interface
 

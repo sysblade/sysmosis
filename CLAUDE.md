@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Krosmosis is a MicroPython-based controller for a reverse osmosis (RO) water filtration system running on an ESP32 microcontroller.
+Sysmosis is a MicroPython-based controller for a reverse osmosis (RO) water filtration system running on an ESP32 microcontroller.
 
 ## Development Commands
 

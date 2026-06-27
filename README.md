@@ -1,4 +1,4 @@
-# Krosmosis
+# Sysmosis
 
 ESP32 MicroPython controller for a reverse osmosis (RO) water filtration system.
 
@@ -176,7 +176,7 @@ Generate a self-signed certificate on your PC and upload it to the device:
 
 ```bash
 openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem \
-            -days 3650 -nodes -subj "/CN=krosmosis"
+            -days 3650 -nodes -subj "/CN=sysmosis"
 
 mpremote connect /dev/ttyUSB0 cp cert.pem :cert.pem
 mpremote connect /dev/ttyUSB0 cp key.pem  :key.pem
@@ -203,23 +203,23 @@ http://<device-ip>:8080/metrics
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `krosmosis_tds_ppm` | gauge | Current TDS reading in PPM |
-| `krosmosis_system_state` | gauge | System state (standby/running/flushing/emergency) |
-| `krosmosis_pressure_low` | gauge | Low pressure sensor state |
-| `krosmosis_pressure_high` | gauge | High pressure sensor state |
-| `krosmosis_leak_detected` | gauge | Leak detection state |
-| `krosmosis_pump_active` | gauge | Pump relay state |
-| `krosmosis_production_seconds` | gauge | Current cycle production time |
-| `krosmosis_production_total_seconds` | counter | Total cumulative production time |
-| `krosmosis_flush_cycles_total` | counter | Number of flush cycles completed |
-| `krosmosis_uptime_seconds` | counter | System uptime |
-| `krosmosis_wifi_connected` | gauge | WiFi connection state |
+| `sysmosis_tds_ppm` | gauge | Current TDS reading in PPM |
+| `sysmosis_system_state` | gauge | System state (standby/running/flushing/emergency) |
+| `sysmosis_pressure_low` | gauge | Low pressure sensor state |
+| `sysmosis_pressure_high` | gauge | High pressure sensor state |
+| `sysmosis_leak_detected` | gauge | Leak detection state |
+| `sysmosis_pump_active` | gauge | Pump relay state |
+| `sysmosis_production_seconds` | gauge | Current cycle production time |
+| `sysmosis_production_total_seconds` | counter | Total cumulative production time |
+| `sysmosis_flush_cycles_total` | counter | Number of flush cycles completed |
+| `sysmosis_uptime_seconds` | counter | System uptime |
+| `sysmosis_wifi_connected` | gauge | WiFi connection state |
 
 ### Example Prometheus scrape config
 
 ```yaml
 scrape_configs:
-  - job_name: 'krosmosis'
+  - job_name: 'sysmosis'
     static_configs:
       - targets: ['192.168.1.100:8080']
     scrape_interval: 15s
@@ -229,10 +229,10 @@ scrape_configs:
 
 ```yaml
 groups:
-  - name: krosmosis
+  - name: sysmosis
     rules:
       - alert: ROLeakDetected
-        expr: krosmosis_leak_detected == 1
+        expr: sysmosis_leak_detected == 1
         for: 0m
         labels:
           severity: critical
@@ -240,7 +240,7 @@ groups:
           summary: "Water leak detected!"
 
       - alert: ROHighTDS
-        expr: krosmosis_tds_ppm > 50
+        expr: sysmosis_tds_ppm > 50
         for: 5m
         labels:
           severity: warning

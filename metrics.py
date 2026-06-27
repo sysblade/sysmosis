@@ -1,4 +1,4 @@
-"""Prometheus metrics server for Krosmosis RO controller."""
+"""Prometheus metrics server for Sysmosis RO controller."""
 
 import socket
 import time
@@ -162,17 +162,17 @@ def create_system_collector(
         system_state = state.get("system_state", 0)
 
         return {
-            "krosmosis_info": {
+            "sysmosis_info": {
                 "help": "System information",
                 "type": "gauge",
                 "values": [{"labels": {"version": "1.0"}, "value": 1}],
             },
-            "krosmosis_uptime_seconds": {
+            "sysmosis_uptime_seconds": {
                 "help": "System uptime in seconds",
                 "type": "counter",
                 "value": int(time.time() - start_time),
             },
-            "krosmosis_system_state": {
+            "sysmosis_system_state": {
                 "help": "Current system state",
                 "type": "gauge",
                 "values": [
@@ -183,67 +183,67 @@ def create_system_collector(
                     {"labels": {"state": "maintenance"}, "value": 1 if system_state == 4 else 0},
                 ],
             },
-            "krosmosis_tds_ppm": {
+            "sysmosis_tds_ppm": {
                 "help": "Current TDS reading in PPM",
                 "type": "gauge",
                 "value": get_tds(),
             },
-            "krosmosis_pressure_low": {
+            "sysmosis_pressure_low": {
                 "help": "Low pressure sensor state",
                 "type": "gauge",
                 "value": sensors.get("lps", 0),
             },
-            "krosmosis_pressure_high": {
+            "sysmosis_pressure_high": {
                 "help": "High pressure sensor state",
                 "type": "gauge",
                 "value": sensors.get("hps", 0),
             },
-            "krosmosis_leak_detected": {
+            "sysmosis_leak_detected": {
                 "help": "Leak sensor state",
                 "type": "gauge",
                 "value": sensors.get("leak", 0),
             },
-            "krosmosis_pump_active": {
+            "sysmosis_pump_active": {
                 "help": "Pump relay state",
                 "type": "gauge",
                 "value": relays.get("pump", 0),
             },
-            "krosmosis_inlet_valve_active": {
+            "sysmosis_inlet_valve_active": {
                 "help": "Inlet valve state",
                 "type": "gauge",
                 "value": relays.get("inlet_v", 0),
             },
-            "krosmosis_flush_valve_active": {
+            "sysmosis_flush_valve_active": {
                 "help": "Flush valve state",
                 "type": "gauge",
                 "value": relays.get("flush_v", 0),
             },
-            "krosmosis_production_seconds": {
+            "sysmosis_production_seconds": {
                 "help": "Current cycle production time",
                 "type": "gauge",
                 "value": int(state.get("production_time", 0)),
             },
-            "krosmosis_production_total_seconds": {
+            "sysmosis_production_total_seconds": {
                 "help": "Total cumulative production time",
                 "type": "counter",
                 "value": int(counters.get("production_total", 0)),
             },
-            "krosmosis_flush_cycles_total": {
+            "sysmosis_flush_cycles_total": {
                 "help": "Number of flush cycles completed",
                 "type": "counter",
                 "value": counters.get("flush_cycles", 0),
             },
-            "krosmosis_time_to_flush_seconds": {
+            "sysmosis_time_to_flush_seconds": {
                 "help": "Time until next flush",
                 "type": "gauge",
                 "value": int(state.get("time_to_flush", 0)),
             },
-            "krosmosis_wifi_connected": {
+            "sysmosis_wifi_connected": {
                 "help": "WiFi connection state",
                 "type": "gauge",
                 "value": 1 if state.get("wifi_connected", False) else 0,
             },
-            "krosmosis_wifi_reconnects_total": {
+            "sysmosis_wifi_reconnects_total": {
                 "help": "Number of WiFi reconnections",
                 "type": "counter",
                 "value": counters.get("wifi_reconnects", 0),

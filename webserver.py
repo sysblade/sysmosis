@@ -1,4 +1,4 @@
-"""HTTP web interface for Krosmosis RO controller."""
+"""HTTP web interface for Sysmosis RO controller."""
 
 import socket
 import ujson
@@ -8,7 +8,7 @@ CONTENT_TYPES = {"html": "text/html", "css": "text/css", "js": "application/java
 
 
 class WebServer:
-    """Non-blocking HTTP server for the Krosmosis web UI."""
+    """Non-blocking HTTP server for the Sysmosis web UI."""
 
     def __init__(self, port=80):
         self.port = port
@@ -54,7 +54,7 @@ class WebServer:
             return False
         for line in raw.split("\r\n"):
             if line.lower().startswith("cookie:"):
-                if "krosmosis_token=" + self._session_token in line:
+                if "sysmosis_token=" + self._session_token in line:
                     return True
         return False
 
@@ -193,7 +193,7 @@ class WebServer:
             client.send((
                 "HTTP/1.1 303 See Other\r\n"
                 "Location: /\r\n"
-                "Set-Cookie: krosmosis_token=" + self._session_token
+                "Set-Cookie: sysmosis_token=" + self._session_token
                 + "; HttpOnly; SameSite=Strict" + secure + "\r\n"
                 "Connection: close\r\n\r\n"
             ).encode("utf-8"))

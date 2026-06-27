@@ -1,5 +1,5 @@
 [project]
-name = "krosmosis"
+name = "sysmosis"
 version = "0.1.0"
 description = "ESP32 MicroPython controller for reverse osmosis water filtration system"
 readme = "README.md"
