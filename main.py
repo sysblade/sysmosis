@@ -348,7 +348,7 @@ class ROController:
         self.last_wifi_check = time.time()
 
     def _init_network_services(self):
-        """Starts web and metrics servers once connected. Only called once per successful connect."""
+        """Starts web and metrics servers once connected. Only called once per successful connect."""  # noqa: E501
         if self.wifi_started:
             return
         import network
@@ -621,7 +621,7 @@ class ROController:
                     self.pump.value(0)
                     self.inlet_v.value(0)
                     self.flush_v.value(0)
-                except:
+                except Exception:
                     pass
                 time.sleep(5)  # Wait before retry/reset
                 import machine
